@@ -122,6 +122,7 @@ mod array_inner;
 mod dictionary_inner;
 #[path = "real.rs"]
 mod real_inner;
+mod custom;
 
 #[doc(hidden)]
 pub mod inner {
