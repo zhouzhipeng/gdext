@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use crate::builtin::GString;
 use crate::builtin::meta::{ConvertError, FromGodot, GodotConvert, ToGodot};
 
@@ -9,9 +10,17 @@ impl<T> GodotConvert for Anyhow<T> {
 
 
 
-impl<T> ToGodot for  Anyhow<T>{
+impl<T> ToGodot for  Anyhow<T>
+where T: Display{
     fn to_godot(&self) -> Self::Via {
-        "anyhowtest".into()
+        match self{
+            Ok(s) => {
+                s.to_string().into()
+            }
+            Err(e) => {
+                format!("ERR:{}", e.to_string()).into()
+            }
+        }
     }
 }
 
