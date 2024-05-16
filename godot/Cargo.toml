@@ -19,7 +19,7 @@ experimental-threads = ["godot-core/experimental-threads"]
 experimental-wasm = []
 formatted = ["godot-core/codegen-fmt"]
 lazy-function-tables = ["godot-core/codegen-lazy-fptrs"]
-serde = ["godot-core/serde"]
+serde = []
 
 # Private features, they are under no stability guarantee
 codegen-full = ["godot-core/codegen-full"]

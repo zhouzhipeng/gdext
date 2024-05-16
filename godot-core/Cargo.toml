@@ -29,9 +29,10 @@ godot-ffi = { path = "../godot-ffi" }
 
 # See https://docs.rs/glam/latest/glam/index.html#feature-gates
 glam = { version = "0.27", features = ["debug-glam-assert"] }
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"]}
 godot-cell = { path = "../godot-cell" }
 anyhow = "1.0.83"
+serde_json = "1.0.117"
 
 # Reverse dev dependencies so doctests can use `godot::` prefix
 [dev-dependencies]

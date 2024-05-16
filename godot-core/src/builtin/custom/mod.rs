@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use serde::Serialize;
 use crate::builtin::GString;
 use crate::builtin::meta::{ConvertError, FromGodot, GodotConvert, ToGodot};
 
@@ -11,11 +12,11 @@ impl<T> GodotConvert for Anyhow<T> {
 
 
 impl<T> ToGodot for  Anyhow<T>
-where T: Display{
+where T: Serialize{
     fn to_godot(&self) -> Self::Via {
         match self{
             Ok(s) => {
-                s.to_string().into()
+                serde_json::to_string(s).unwrap_or("ERR:string to json error!".to_string()).into()
             }
             Err(e) => {
                 format!("ERR:{}", e.to_string()).into()
