@@ -16,7 +16,7 @@ where T: Serialize{
     fn to_godot(&self) -> Self::Via {
         match self{
             Ok(s) => {
-                serde_json::to_string(s).unwrap_or("ERR:string to json error!".to_string()).into()
+                serde_json::to_string(s).unwrap_or("ERR:json serialize error!".to_string()).into()
             }
             Err(e) => {
                 format!("ERR:{}", e.to_string()).into()
