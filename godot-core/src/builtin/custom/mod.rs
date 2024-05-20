@@ -1,12 +1,14 @@
 use std::fmt::Display;
 use serde::Serialize;
-use crate::builtin::GString;
+use crate::builtin::{Dictionary, GString, Variant};
 use crate::builtin::meta::{ConvertError, FromGodot, GodotConvert, ToGodot};
+use crate::engine::Json;
+use crate::godot_print;
 
 type Anyhow<T> = anyhow::Result<T>;
 
 impl<T> GodotConvert for Anyhow<T> {
-    type Via = GString;
+    type Via = Dictionary;
 }
 
 
@@ -14,12 +16,26 @@ impl<T> GodotConvert for Anyhow<T> {
 impl<T> ToGodot for  Anyhow<T>
 where T: Serialize{
     fn to_godot(&self) -> Self::Via {
+        let mut dict = Dictionary::new();
+        dict.insert("Ok", "");
+        dict.insert("Err", "");
+
         match self{
             Ok(s) => {
-                serde_json::to_string(s).unwrap_or("ERR:json serialize error!".to_string()).into()
+                match serde_json::to_string(s){
+                    Ok(s) => {
+                        let data = Json::parse_string(s.into());
+                        dict.insert("Ok", data);
+                        return dict
+                    }
+                    Err(e) => {
+                        panic!("serde_json::to_string error: {}", e);
+                    }
+                }
             }
             Err(e) => {
-                format!("ERR:{}", e.to_string()).into()
+                dict.insert("Err", e.to_string());
+                return dict
             }
         }
     }
