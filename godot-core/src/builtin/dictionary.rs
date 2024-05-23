@@ -9,11 +9,12 @@ use godot_ffi as sys;
 
 use crate::builtin::meta::{FromGodot, ToGodot};
 use crate::builtin::{inner, Variant, VariantArray};
-use crate::property::{Export, PropertyHintInfo, TypeStringHint, Var};
-use std::marker::PhantomData;
-use std::{fmt, ptr};
+use crate::property::{builtin_type_string, Export, PropertyHintInfo, TypeStringHint, Var};
 use sys::types::OpaqueDictionary;
 use sys::{ffi_methods, interface_fn, GodotFfi};
+
+use std::marker::PhantomData;
+use std::{fmt, ptr};
 
 use super::meta::impl_godot_as_self;
 
@@ -330,7 +331,7 @@ impl Var for Dictionary {
 
 impl TypeStringHint for Dictionary {
     fn type_string() -> String {
-        format!("{}:Dictionary", sys::VariantType::Dictionary as i32)
+        builtin_type_string::<Dictionary>()
     }
 }
 
