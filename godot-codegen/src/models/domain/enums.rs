@@ -18,13 +18,16 @@ pub struct Enum {
     pub name: Ident,
     pub godot_name: String,
     pub is_bitfield: bool,
+    pub is_private: bool,
+    pub is_exhaustive: bool,
     pub enumerators: Vec<Enumerator>,
 }
 
 impl Enum {
     /// Which traits should be derived for this enum.
     pub fn derives(&self) -> Vec<Ident> {
-        let mut derives = vec!["Copy", "Clone", "Eq", "PartialEq", "Hash", "Debug"];
+        // Debug is implemented manually, using enumerator name. This can be derived once we use proper enums.
+        let mut derives = vec!["Copy", "Clone", "Eq", "PartialEq", "Hash"];
 
         if self.is_bitfield {
             derives.push("Default");

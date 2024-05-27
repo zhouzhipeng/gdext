@@ -245,13 +245,13 @@ impl_common_vector_fns!(Vector2, real);
 impl_float_vector_glam_fns!(Vector2, real);
 impl_float_vector_component_fns!(Vector2, real, (x, y));
 impl_vector_operators!(Vector2, real, (x, y));
-impl_from_tuple_for_vector2x!(Vector2, real);
+impl_swizzle_trait_for_vector2x!(Vector2, real);
 
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector2 {
     fn variant_type() -> sys::VariantType {
-        sys::VariantType::Vector2
+        sys::VariantType::VECTOR2
     }
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }

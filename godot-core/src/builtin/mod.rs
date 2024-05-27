@@ -36,6 +36,12 @@
 // Re-export macros.
 pub use crate::{array, dict, real, reals, varray};
 
+// Re-export generated enums.
+pub use crate::gen::central::global_reexported_enums::{Corner, EulerOrder, Side, VariantOperator};
+pub use crate::sys::VariantType;
+// Not yet public.
+pub(crate) use crate::gen::central::VariantDispatch;
+
 #[doc(hidden)]
 pub mod __prelude_reexport {
     use super::*;
@@ -62,6 +68,7 @@ pub mod __prelude_reexport {
     pub use variant::*;
     pub use vectors::*;
 
+    pub use super::{EulerOrder, Side, VariantOperator, VariantType};
     pub use crate::{array, dict, real, reals, varray};
 }
 
@@ -149,17 +156,28 @@ pub(crate) fn u8_to_bool(u: u8) -> bool {
     }
 }
 
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Deprecated enums
+
 /// The side of a [`Rect2`] or [`Rect2i`].
 ///
 /// _Godot equivalent: `@GlobalScope.Side`_
-#[doc(alias = "Side")]
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub enum RectSide {
-    Left = 0,
-    Top = 1,
-    Right = 2,
-    Bottom = 3,
+#[deprecated = "Merged with `godot::builtin::Side`."]
+pub type RectSide = Side;
+
+#[allow(non_upper_case_globals)]
+impl Side {
+    #[deprecated(note = "Renamed to `Side::LEFT`.")]
+    pub const Left: Side = Side::LEFT;
+
+    #[deprecated(note = "Renamed to `Side::TOP`.")]
+    pub const Top: Side = Side::TOP;
+
+    #[deprecated(note = "Renamed to `Side::RIGHT`.")]
+    pub const Right: Side = Side::RIGHT;
+
+    #[deprecated(note = "Renamed to `Side::BOTTOM`.")]
+    pub const Bottom: Side = Side::BOTTOM;
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------

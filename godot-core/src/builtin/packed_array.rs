@@ -9,7 +9,7 @@ use godot_ffi as sys;
 
 use crate::builtin::meta::ToGodot;
 use crate::builtin::*;
-use std::fmt;
+use std::{fmt, ops};
 use sys::types::*;
 use sys::{ffi_methods, interface_fn, GodotFfi};
 
@@ -26,6 +26,8 @@ macro_rules! impl_packed_array {
     (
         // Name of the type to define, e.g. `PackedByteArray`.
         type_name: $PackedArray:ident,
+        // Name of the VariantType constant, e.g. `PACKED_BYTE_ARRAY`.
+        variant_type: $VariantType:ident,
         // Type of elements contained in the array, e.g. `u8`.
         element_type: $Element:ty,
         // Name of wrapped opaque type, e.g. `OpaquePackedByteArray`.
@@ -50,7 +52,9 @@ macro_rules! impl_packed_array {
     ) => {
         // TODO expand type names in doc comments (use e.g. `paste` crate)
         #[doc = concat!("Implements Godot's `", stringify!($PackedArray), "` type,")]
-        #[doc = concat!("which is an efficient array of `", stringify!($Element), "`s.")]
+        #[doc = concat!("which is a space-efficient array of `", stringify!($Element), "`s.")]
+        ///
+        /// Check out the [book](https://godot-rust.github.io/book/godot-api/builtins.html#packed-arrays) for a tutorial on packed arrays.
         ///
         /// Note that, unlike `Array`, this type has value semantics: each copy will be independent
         /// of the original. Under the hood, Godot uses copy-on-write, so copies are still cheap
@@ -62,7 +66,7 @@ macro_rules! impl_packed_array {
         /// editor (for `#[export]`) will effectively keep an independent copy of the array. Writes to the packed array from Rust are thus not
         /// reflected on the other side -- you may need to replace the entire array.
         ///
-        /// See also [#godot/76150](https://github.com/godotengine/godot/issues/76150) for details.
+        /// See also [godot/#76150](https://github.com/godotengine/godot/issues/76150) for details.
         ///
         /// # Thread safety
         ///
@@ -79,13 +83,33 @@ macro_rules! impl_packed_array {
             fn from_opaque(opaque: $Opaque) -> Self {
                 Self { opaque }
             }
-        }
 
-        // This impl relies on `$Inner` which is not (yet) available in unit tests
-        impl $PackedArray {
             /// Constructs an empty array.
             pub fn new() -> Self {
                 Self::default()
+            }
+
+            /// Returns a copy of the value at the specified index, or `None` if out-of-bounds.
+            ///
+            /// If you know the index is valid, use the `[]` operator (`Index`/`IndexMut` traits) instead.
+            pub fn get(&self, index: usize) -> Option<$Element> {
+                let ptr = self.ptr_or_none(index)?;
+
+                // SAFETY: if index was out of bounds, `ptr` would be `None` and return early.
+                unsafe { Some((*ptr).clone()) }
+            }
+
+            /// Returns `true` if the array contains the given value.
+            ///
+            /// _Godot equivalent: `has`_
+            #[doc(alias = "has")]
+            pub fn contains(&self, value: &$Element) -> bool {
+                self.as_inner().has(Self::to_arg(value))
+            }
+
+            /// Returns the number of times a value is in the array.
+            pub fn count(&self, value: &$Element) -> usize {
+                to_usize(self.as_inner().count(Self::to_arg(value)))
             }
 
             /// Returns the number of elements in the array. Equivalent of `size()` in Godot.
@@ -96,6 +120,86 @@ macro_rules! impl_packed_array {
             /// Returns `true` if the array is empty.
             pub fn is_empty(&self) -> bool {
                 self.as_inner().is_empty()
+            }
+
+            /// Clears the array, removing all elements.
+            pub fn clear(&mut self) {
+                self.as_inner().clear();
+            }
+
+            /// Sets the value at the specified index.
+            ///
+            /// # Panics
+            ///
+            /// If `index` is out of bounds.
+            #[deprecated = "Use [] operator (IndexMut) instead."]
+            pub fn set(&mut self, index: usize, value: $Element) {
+                let ptr_mut = self.ptr_mut(index);
+
+                // SAFETY: `ptr_mut` just checked that the index is not out of bounds.
+                unsafe {
+                    *ptr_mut = value;
+                }
+            }
+
+            /// Appends an element to the end of the array. Equivalent of `append` and `push_back`
+            /// in GDScript.
+            #[doc(alias = "append")]
+            #[doc(alias = "push_back")]
+            pub fn push(&mut self, value: $Element) {
+                self.as_inner().push_back(Self::into_arg(value));
+            }
+
+            /// Inserts a new element at a given index in the array. The index must be valid, or at
+            /// the end of the array (`index == len()`).
+            ///
+            /// Note: On large arrays, this method is much slower than `push` as it will move all
+            /// the array's elements after the inserted element. The larger the array, the slower
+            /// `insert` will be.
+            pub fn insert(&mut self, index: usize, value: $Element) {
+                // Intentional > and not >=.
+                if index > self.len() {
+                    self.panic_out_of_bounds(index);
+                }
+
+                self.as_inner().insert(to_i64(index), Self::into_arg(value));
+            }
+
+            /// Removes and returns the element at the specified index. Similar to `remove_at` in
+            /// GDScript, but also returns the removed value.
+            ///
+            /// On large arrays, this method is much slower than `pop_back` as it will move all the array's
+            /// elements after the removed element. The larger the array, the slower `remove` will be.
+            ///
+            /// # Panics
+            ///
+            /// If `index` is out of bounds.
+            // Design note: This returns the removed value instead of `()` for consistency with
+            // `Array` and with `Vec::remove`. Compared to shifting all the subsequent array
+            // elements to their new position, the overhead of retrieving this element is trivial.
+            #[doc(alias = "remove_at")]
+            pub fn remove(&mut self, index: usize) -> $Element {
+                let element = self[index].clone(); // panics on out-of-bounds
+                self.as_inner().remove_at(to_i64(index));
+                element
+            }
+
+            /// Assigns the given value to all elements in the array. This can be used together
+            /// with `resize` to create an array with a given size and initialized elements.
+            pub fn fill(&mut self, value: $Element) {
+                self.as_inner().fill(Self::into_arg(value));
+            }
+
+            /// Resizes the array to contain a different number of elements. If the new size is
+            /// smaller, elements are removed from the end. If the new size is larger, new elements
+            /// are set to [`Default::default()`].
+            pub fn resize(&mut self, size: usize) {
+                self.as_inner().resize(to_i64(size));
+            }
+
+            /// Appends another array at the end of this array. Equivalent of `append_array` in GDScript.
+            pub fn extend_array(&mut self, other: &$PackedArray) {
+                self.as_inner().append_array(other.clone());
             }
 
             /// Converts this array to a Rust vector, making a copy of its contents.
@@ -115,18 +219,6 @@ macro_rules! impl_packed_array {
                     }
                 }
                 vec
-            }
-
-            /// Clears the array, removing all elements.
-            pub fn clear(&mut self) {
-                self.as_inner().clear();
-            }
-
-            /// Resizes the array to contain a different number of elements. If the new size is
-            /// smaller, elements are removed from the end. If the new size is larger, new elements
-            /// are set to [`Default::default()`].
-            pub fn resize(&mut self, size: usize) {
-                self.as_inner().resize(to_i64(size));
             }
 
             /// Returns a sub-range `begin..end`, as a new packed array.
@@ -183,45 +275,12 @@ macro_rules! impl_packed_array {
                 }
             }
 
-            /// Returns a copy of the value at the specified index.
-            ///
-            /// # Panics
-            ///
-            /// If `index` is out of bounds.
-            pub fn get(&self, index: usize) -> $Element {
-                let ptr = self.ptr(index);
-                // SAFETY: `ptr` just verified that the index is not out of bounds.
-                unsafe { (*ptr).clone() }
-            }
-
-            /// Finds the index of an existing value in a sorted array using binary search.
-            /// Equivalent of `bsearch` in GDScript.
-            ///
-            /// If the value is not present in the array, returns the insertion index that would
-            /// maintain sorting order.
-            ///
-            /// Calling `binary_search` on an unsorted array results in unspecified behavior.
-            pub fn binary_search(&self, value: $Element) -> usize {
-                to_usize(self.as_inner().bsearch(Self::into_arg(value), true))
-            }
-
-            /// Returns the number of times a value is in the array.
-            pub fn count(&self, value: $Element) -> usize {
-                to_usize(self.as_inner().count(Self::into_arg(value)))
-            }
-
-            /// Returns `true` if the array contains the given value. Equivalent of `has` in
-            /// GDScript.
-            pub fn contains(&self, value: $Element) -> bool {
-                self.as_inner().has(Self::into_arg(value))
-            }
-
             /// Searches the array for the first occurrence of a value and returns its index, or
             /// `None` if not found. Starts searching at index `from`; pass `None` to search the
             /// entire array.
-            pub fn find(&self, value: $Element, from: Option<usize>) -> Option<usize> {
+            pub fn find(&self, value: &$Element, from: Option<usize>) -> Option<usize> {
                 let from = to_i64(from.unwrap_or(0));
-                let index = self.as_inner().find(Self::into_arg(value), from);
+                let index = self.as_inner().find(Self::to_arg(value), from);
                 if index >= 0 {
                     Some(index.try_into().unwrap())
                 } else {
@@ -232,9 +291,9 @@ macro_rules! impl_packed_array {
             /// Searches the array backwards for the last occurrence of a value and returns its
             /// index, or `None` if not found. Starts searching at index `from`; pass `None` to
             /// search the entire array.
-            pub fn rfind(&self, value: $Element, from: Option<usize>) -> Option<usize> {
+            pub fn rfind(&self, value: &$Element, from: Option<usize>) -> Option<usize> {
                 let from = from.map(to_i64).unwrap_or(-1);
-                let index = self.as_inner().rfind(Self::into_arg(value), from);
+                let index = self.as_inner().rfind(Self::to_arg(value), from);
                 // It's not documented, but `rfind` returns -1 if not found.
                 if index >= 0 {
                     Some(to_usize(index))
@@ -243,72 +302,18 @@ macro_rules! impl_packed_array {
                 }
             }
 
-            /// Sets the value at the specified index.
+            /// Finds the index of an existing value in a _sorted_ array using binary search.
             ///
-            /// # Panics
+            /// If the value is not present in the array, returns the insertion index that would maintain sorting order.
             ///
-            /// If `index` is out of bounds.
-            pub fn set(&mut self, index: usize, value: $Element) {
-                let ptr_mut = self.ptr_mut(index);
-
-                // SAFETY: `ptr_mut` just checked that the index is not out of bounds.
-                unsafe {
-                    *ptr_mut = value;
-                }
+            /// Calling `bsearch()` on an unsorted array results in unspecified (but safe) behavior.
+            pub fn bsearch(&self, value: &$Element) -> usize {
+                to_usize(self.as_inner().bsearch(Self::to_arg(value), true))
             }
 
-            /// Appends an element to the end of the array. Equivalent of `append` and `push_back`
-            /// in GDScript.
-            #[doc(alias = "append")]
-            #[doc(alias = "push_back")]
-            pub fn push(&mut self, value: $Element) {
-                self.as_inner().push_back(Self::into_arg(value));
-            }
-
-            /// Inserts a new element at a given index in the array. The index must be valid, or at
-            /// the end of the array (`index == len()`).
-            ///
-            /// Note: On large arrays, this method is much slower than `push` as it will move all
-            /// the array's elements after the inserted element. The larger the array, the slower
-            /// `insert` will be.
-            pub fn insert(&mut self, index: usize, value: $Element) {
-                let len = self.len();
-                assert!(
-                    index <= len,
-                    "Array insertion index {index} is out of bounds: length is {len}");
-                self.as_inner().insert(to_i64(index), Self::into_arg(value));
-            }
-
-            /// Removes and returns the element at the specified index. Similar to `remove_at` in
-            /// GDScript, but also returns the removed value.
-            ///
-            /// On large arrays, this method is much slower than `pop_back` as it will move all the array's
-            /// elements after the removed element. The larger the array, the slower `remove` will be.
-            ///
-            /// # Panics
-            ///
-            /// If `index` is out of bounds.
-            // Design note: This returns the removed value instead of `()` for consistency with
-            // `Array` and with `Vec::remove`. Compared to shifting all the subsequent array
-            // elements to their new position, the overhead of retrieving this element is trivial.
-            #[doc(alias = "remove_at")]
-            pub fn remove(&mut self, index: usize) -> $Element {
-                self.check_bounds(index);
-                let element = self.get(index);
-                self.as_inner().remove_at(to_i64(index));
-                element
-            }
-
-            /// Assigns the given value to all elements in the array. This can be used together
-            /// with `resize` to create an array with a given size and initialized elements.
-            pub fn fill(&mut self, value: $Element) {
-                self.as_inner().fill(Self::into_arg(value));
-            }
-
-            /// Appends another array at the end of this array. Equivalent of `append_array` in
-            /// GDScript.
-            pub fn extend_array(&mut self, other: &$PackedArray) {
-                self.as_inner().append_array(other.clone());
+            #[deprecated = "Renamed to bsearch like in Godot, to avoid confusion with Rust's slice::binary_search."]
+            pub fn binary_search(&self, value: $Element) -> usize {
+                self.bsearch(&value)
             }
 
             /// Reverses the order of the elements in the array.
@@ -317,9 +322,9 @@ macro_rules! impl_packed_array {
             }
 
             /// Sorts the elements of the array in ascending order.
-            // Presumably, just like `Array`, this is not a stable sort so we might call it
-            // `sort_unstable`. But Packed*Array elements that compare equal are always identical,
-            // so it doesn't matter.
+            ///
+            /// This sort is [stable](https://en.wikipedia.org/wiki/Sorting_algorithm#Stability), since elements inside packed arrays are
+            /// indistinguishable. Relative order between equal elements thus isn't observable.
             pub fn sort(&mut self) {
                 self.as_inner().sort();
             }
@@ -327,16 +332,11 @@ macro_rules! impl_packed_array {
             // Include specific functions in the code only if the Packed*Array provides the function.
             impl_specific_packed_array_functions!($PackedArray);
 
-            /// Asserts that the given index refers to an existing element.
-            ///
             /// # Panics
             ///
-            /// If `index` is out of bounds.
-            fn check_bounds(&self, index: usize) {
-                let len = self.len();
-                assert!(
-                    index < len,
-                    "Array index {index} is out of bounds: length is {len}");
+            /// Always.
+            fn panic_out_of_bounds(&self, index: usize) -> ! {
+                panic!("Array index {index} is out of bounds: length is {}", self.len());
             }
 
             /// Returns a pointer to the element at the given index.
@@ -345,15 +345,21 @@ macro_rules! impl_packed_array {
             ///
             /// If `index` is out of bounds.
             fn ptr(&self, index: usize) -> *const $Element {
-                self.check_bounds(index);
-                // SAFETY: We just checked that the index is not out of bounds.
-                let ptr = unsafe {
-                    let item_ptr: *const $IndexRetType =
-                        (interface_fn!($operator_index_const))(self.sys(), to_i64(index));
-                    item_ptr as *const $Element
+                self.ptr_or_none(index).unwrap_or_else(|| self.panic_out_of_bounds(index))
+            }
+
+            /// Returns a pointer to the element at the given index, or `None` if out of bounds.
+            fn ptr_or_none(&self, index: usize) -> Option<*const $Element> {
+                // SAFETY: The packed array index operators return a null pointer on out-of-bounds.
+                let item_ptr: *const $IndexRetType = unsafe {
+                    interface_fn!($operator_index_const)(self.sys(), to_i64(index))
                 };
-                assert!(!ptr.is_null());
-                ptr
+
+                if item_ptr.is_null() {
+                    None
+                } else {
+                    Some(item_ptr as *const $Element)
+                }
             }
 
             /// Returns a mutable pointer to the element at the given index.
@@ -362,16 +368,16 @@ macro_rules! impl_packed_array {
             ///
             /// If `index` is out of bounds.
             fn ptr_mut(&mut self, index: usize) -> *mut $Element {
-                self.check_bounds(index);
-
-                // SAFETY: We just checked that the index is not out of bounds.
-                let ptr = unsafe {
-                    let item_ptr: *mut $IndexRetType =
-                        (interface_fn!($operator_index))(self.sys_mut(), to_i64(index));
-                    item_ptr as *mut $Element
+                // SAFETY: The packed array index operators return a null pointer on out-of-bounds.
+                let item_ptr: *mut $IndexRetType = unsafe {
+                    interface_fn!($operator_index)(self.sys_mut(), to_i64(index))
                 };
-                assert!(!ptr.is_null());
-                ptr
+
+                if item_ptr.is_null() {
+                    self.panic_out_of_bounds(index)
+                } else {
+                    item_ptr as *mut $Element
+                }
             }
 
             #[doc = concat!("Converts a `", stringify!($Element), "` into a value that can be")]
@@ -380,6 +386,12 @@ macro_rules! impl_packed_array {
             #[inline]
             fn into_arg(e: $Element) -> $Arg {
                 e.into()
+            }
+
+            #[inline]
+            fn to_arg(e: &$Element) -> $Arg {
+                // Once PackedArra<T> is generic, this could use a better tailored implementation that may not need to clone.
+                e.clone().into()
             }
 
             #[doc(hidden)]
@@ -391,6 +403,24 @@ macro_rules! impl_packed_array {
         impl_builtin_traits! {
             for $PackedArray {
                 $($trait_impls)*
+            }
+        }
+
+        impl ops::Index<usize> for $PackedArray {
+            type Output = $Element;
+
+            fn index(&self, index: usize) -> &Self::Output {
+                let ptr = self.ptr(index);
+                // SAFETY: `ptr` checked bounds.
+                unsafe { &*ptr }
+            }
+        }
+
+        impl ops::IndexMut<usize> for $PackedArray {
+            fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+                let ptr = self.ptr_mut(index);
+                // SAFETY: `ptr` checked bounds.
+                unsafe { &mut *ptr }
             }
         }
 
@@ -459,11 +489,11 @@ macro_rules! impl_packed_array {
             /// Formats `PackedArray` to match Godot's string representation.
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, "[")?;
-                for i in 0..self.len() {
+                for (i, elem) in self.as_slice().iter().enumerate() {
                     if i != 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", self.get(i))?;
+                    write!(f, "{elem}")?;
                 }
                 write!(f, "]")
             }
@@ -471,7 +501,7 @@ macro_rules! impl_packed_array {
 
         unsafe impl GodotFfi for $PackedArray {
             fn variant_type() -> sys::VariantType {
-                sys::VariantType::$PackedArray
+                sys::VariantType::$VariantType
             }
 
             ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
@@ -484,7 +514,7 @@ macro_rules! impl_packed_array {
                 // In 4.3 Godot can (and does) use type hint strings for packed arrays, see https://github.com/godotengine/godot/pull/82952.
                 if sys::GdextBuild::since_api("4.3") {
                     $crate::property::PropertyHintInfo {
-                        hint: $crate::engine::global::PropertyHint::TYPE_STRING,
+                        hint: $crate::global::PropertyHint::TYPE_STRING,
                         hint_string: <$Element as $crate::property::TypeStringHint>::type_string().into(),
                     }
                 } else {
@@ -546,6 +576,7 @@ macro_rules! impl_specific_packed_array_functions {
 
 impl_packed_array!(
     type_name: PackedByteArray,
+    variant_type: PACKED_BYTE_ARRAY,
     element_type: u8,
     opaque_type: OpaquePackedByteArray,
     inner_type: InnerPackedByteArray,
@@ -564,6 +595,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedInt32Array,
+    variant_type: PACKED_INT32_ARRAY,
     element_type: i32,
     opaque_type: OpaquePackedInt32Array,
     inner_type: InnerPackedInt32Array,
@@ -582,6 +614,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedInt64Array,
+    variant_type: PACKED_INT64_ARRAY,
     element_type: i64,
     opaque_type: OpaquePackedInt64Array,
     inner_type: InnerPackedInt64Array,
@@ -600,6 +633,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedFloat32Array,
+    variant_type: PACKED_FLOAT32_ARRAY,
     element_type: f32,
     opaque_type: OpaquePackedFloat32Array,
     inner_type: InnerPackedFloat32Array,
@@ -618,6 +652,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedFloat64Array,
+    variant_type: PACKED_FLOAT64_ARRAY,
     element_type: f64,
     opaque_type: OpaquePackedFloat64Array,
     inner_type: InnerPackedFloat64Array,
@@ -636,6 +671,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedStringArray,
+    variant_type: PACKED_STRING_ARRAY,
     element_type: GString,
     opaque_type: OpaquePackedStringArray,
     inner_type: InnerPackedStringArray,
@@ -654,6 +690,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedVector2Array,
+    variant_type: PACKED_VECTOR2_ARRAY,
     element_type: Vector2,
     opaque_type: OpaquePackedVector2Array,
     inner_type: InnerPackedVector2Array,
@@ -672,6 +709,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedVector3Array,
+    variant_type: PACKED_VECTOR3_ARRAY,
     element_type: Vector3,
     opaque_type: OpaquePackedVector3Array,
     inner_type: InnerPackedVector3Array,
@@ -691,6 +729,7 @@ impl_packed_array!(
 #[cfg(since_api = "4.3")]
 impl_packed_array!(
     type_name: PackedVector4Array,
+    variant_type: PACKED_VECTOR4_ARRAY,
     element_type: Vector4,
     opaque_type: OpaquePackedVector4Array,
     inner_type: InnerPackedVector4Array,
@@ -709,6 +748,7 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedColorArray,
+    variant_type: PACKED_COLOR_ARRAY,
     element_type: Color,
     opaque_type: OpaquePackedColorArray,
     inner_type: InnerPackedColorArray,

@@ -9,11 +9,9 @@ use std::ffi::c_void;
 
 use godot::builtin::meta::{ClassName, FromGodot, MethodInfo, PropertyInfo, ToGodot};
 use godot::builtin::{GString, StringName, Variant, VariantType};
-use godot::engine::global::{MethodFlags, PropertyHint, PropertyUsageFlags};
-use godot::engine::{
-    create_script_instance, IScriptExtension, Object, Script, ScriptExtension, ScriptInstance,
-    ScriptLanguage, SiMut,
-};
+use godot::engine::{IScriptExtension, Object, Script, ScriptExtension, ScriptLanguage};
+use godot::extras::{create_script_instance, ScriptInstance, SiMut};
+use godot::global::{MethodFlags, PropertyHint, PropertyUsageFlags};
 use godot::obj::{Base, Gd, WithBaseField};
 use godot::register::{godot_api, GodotClass};
 use godot::sys;
@@ -26,12 +24,12 @@ struct TestScript {
 
 #[godot_api]
 impl IScriptExtension for TestScript {
-    unsafe fn instance_create(&self, for_object: Gd<Object>) -> *mut c_void {
-        create_script_instance(TestScriptInstance::new(self.to_gd().upcast()), for_object)
-    }
-
     fn can_instantiate(&self) -> bool {
         true
+    }
+
+    unsafe fn instance_create(&self, for_object: Gd<Object>) -> *mut c_void {
+        create_script_instance(TestScriptInstance::new(self.to_gd().upcast()), for_object)
     }
 }
 
@@ -49,7 +47,7 @@ impl TestScriptInstance {
             script,
             script_property_b: false,
             prop_list: vec![PropertyInfo {
-                variant_type: VariantType::Int,
+                variant_type: VariantType::INT,
                 property_name: StringName::from("script_property_a"),
                 class_name: ClassName::from_ascii_cstr("\0".as_bytes()),
                 hint: PropertyHint::NONE,
@@ -62,7 +60,7 @@ impl TestScriptInstance {
                 method_name: StringName::from("script_method_a"),
                 class_name: ClassName::from_ascii_cstr("TestScript\0".as_bytes()),
                 return_type: PropertyInfo {
-                    variant_type: VariantType::String,
+                    variant_type: VariantType::STRING,
                     class_name: ClassName::none(),
                     property_name: StringName::from(""),
                     hint: PropertyHint::NONE,
@@ -71,7 +69,7 @@ impl TestScriptInstance {
                 },
                 arguments: vec![
                     PropertyInfo {
-                        variant_type: VariantType::String,
+                        variant_type: VariantType::STRING,
                         class_name: ClassName::none(),
                         property_name: StringName::from(""),
                         hint: PropertyHint::NONE,
@@ -79,7 +77,7 @@ impl TestScriptInstance {
                         usage: PropertyUsageFlags::NONE,
                     },
                     PropertyInfo {
-                        variant_type: VariantType::Int,
+                        variant_type: VariantType::INT,
                         class_name: ClassName::none(),
                         property_name: StringName::from(""),
                         hint: PropertyHint::NONE,
@@ -180,8 +178,8 @@ impl ScriptInstance for TestScriptInstance {
 
     fn get_property_type(&self, name: StringName) -> VariantType {
         match name.to_string().as_str() {
-            "script_property_a" => VariantType::Int,
-            _ => VariantType::Nil,
+            "script_property_a" => VariantType::INT,
+            _ => VariantType::NIL,
         }
     }
 

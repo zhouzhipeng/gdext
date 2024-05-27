@@ -7,8 +7,8 @@
 
 use godot::builtin::meta::{GodotConvert, ToGodot};
 use godot::builtin::{dict, Color, Dictionary, GString, Variant, VariantType};
-use godot::engine::global::{PropertyHint, PropertyUsageFlags};
 use godot::engine::{INode, IRefCounted, Node, Object, RefCounted, Resource, Texture};
+use godot::global::{PropertyHint, PropertyUsageFlags};
 use godot::obj::{Base, EngineBitfield, EngineEnum, Gd, NewAlloc, NewGd};
 use godot::register::property::{Export, PropertyHintInfo, Var};
 use godot::register::{godot_api, Export, GodotClass, GodotConvert, Var};
@@ -357,7 +357,7 @@ fn derive_export() {
         .unwrap();
     // `class_name` should be empty for non-Object variants.
     check_property(&property, "class_name", "");
-    check_property(&property, "type", VariantType::Int as i32);
+    check_property(&property, "type", VariantType::INT.ord());
     check_property(&property, "hint", PropertyHint::ENUM.ord());
     check_property(&property, "hint_string", "A:0,B:1,C:2");
     check_property(&property, "usage", PropertyUsageFlags::DEFAULT.ord());
@@ -392,7 +392,7 @@ fn export_resource() {
         .find(|c| c.get_or_nil("name") == "foo".to_variant())
         .unwrap();
     check_property(&property, "class_name", "CustomResource");
-    check_property(&property, "type", VariantType::Object as i32);
+    check_property(&property, "type", VariantType::OBJECT.ord());
     check_property(&property, "hint", PropertyHint::RESOURCE_TYPE.ord());
     check_property(&property, "hint_string", "CustomResource");
     check_property(
@@ -407,7 +407,7 @@ fn export_resource() {
         .find(|c| c.get_or_nil("name") == "bar".to_variant())
         .unwrap();
     check_property(&property, "class_name", "NewNameCustomResource");
-    check_property(&property, "type", VariantType::Object as i32);
+    check_property(&property, "type", VariantType::OBJECT.ord());
     check_property(&property, "hint", PropertyHint::RESOURCE_TYPE.ord());
     check_property(&property, "hint_string", "NewNameCustomResource");
     check_property(&property, "usage", PropertyUsageFlags::DEFAULT.ord());

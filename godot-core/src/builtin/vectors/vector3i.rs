@@ -157,13 +157,13 @@ impl_common_vector_fns!(Vector3i, i32);
 impl_integer_vector_glam_fns!(Vector3i, real);
 impl_integer_vector_component_fns!(Vector3i, real, (x, y, z));
 impl_vector_operators!(Vector3i, i32, (x, y, z));
-impl_from_tuple_for_vector3x!(Vector3i, i32);
+impl_swizzle_trait_for_vector3x!(Vector3i, i32);
 
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector3i {
     fn variant_type() -> sys::VariantType {
-        sys::VariantType::Vector3i
+        sys::VariantType::VECTOR3I
     }
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }

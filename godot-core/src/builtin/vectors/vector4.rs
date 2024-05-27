@@ -44,7 +44,7 @@ impl_vector_operators!(Vector4, real, (x, y, z, w));
 impl_common_vector_fns!(Vector4, real);
 impl_float_vector_glam_fns!(Vector4, real);
 impl_float_vector_component_fns!(Vector4, real, (x, y, z, w));
-impl_from_tuple_for_vector4x!(Vector4, real);
+impl_swizzle_trait_for_vector4x!(Vector4, real);
 
 impl Vector4 {
     /// Returns a `Vector4` with the given components.
@@ -102,7 +102,7 @@ impl fmt::Display for Vector4 {
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector4 {
     fn variant_type() -> sys::VariantType {
-        sys::VariantType::Vector4
+        sys::VariantType::VECTOR4
     }
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }

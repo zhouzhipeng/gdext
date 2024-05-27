@@ -113,6 +113,34 @@ impl StringName {
         fn string_sys_mut = sys_mut;
     }
 
+    /// Consumes self and turns it into a sys-ptr, should be used together with [`from_owned_string_sys`](Self::from_owned_string_sys).
+    ///
+    /// This will leak memory unless `from_owned_string_sys` is called on the returned pointer.
+    pub(crate) fn into_owned_string_sys(self) -> sys::GDExtensionStringNamePtr {
+        sys::static_assert_eq_size_align!(StringName, sys::types::OpaqueStringName);
+
+        let leaked = Box::into_raw(Box::new(self));
+        leaked.cast()
+    }
+
+    /// Creates a `StringName` from a sys-ptr without incrementing the refcount.
+    ///
+    /// # Safety
+    ///
+    /// * Must only be used on a pointer returned from a call to [`into_owned_string_sys`](Self::into_owned_string_sys).
+    /// * Must not be called more than once on the same pointer.
+    #[deny(unsafe_op_in_unsafe_fn)]
+    pub(crate) unsafe fn from_owned_string_sys(ptr: sys::GDExtensionStringNamePtr) -> Self {
+        sys::static_assert_eq_size_align!(StringName, sys::types::OpaqueStringName);
+
+        let ptr = ptr.cast::<Self>();
+
+        // SAFETY: `ptr` was returned from a call to `into_owned_string_sys`, which means it was created by a call to
+        // `Box::into_raw`, thus we can use `Box::from_raw` here. Additionally this is only called once on this pointer.
+        let boxed = unsafe { Box::from_raw(ptr) };
+        *boxed
+    }
+
     /// Convert a `StringName` sys pointer to a reference with unbounded lifetime.
     ///
     /// # Safety
@@ -148,7 +176,7 @@ impl StringName {
 //   `std::mem::forget(string_name.clone())`.
 unsafe impl GodotFfi for StringName {
     fn variant_type() -> sys::VariantType {
-        sys::VariantType::StringName
+        sys::VariantType::STRING_NAME
     }
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
@@ -365,6 +393,8 @@ mod serialize {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::fmt::Formatter;
 
+    // For "Available on crate feature `serde`" in docs. Cannot be inherited from module. Also does not support #[derive] (e.g. in Vector2).
+    #[cfg_attr(published_docs, doc(cfg(feature = "serde")))]
     impl Serialize for StringName {
         #[inline]
         fn serialize<S>(
@@ -378,7 +408,8 @@ mod serialize {
         }
     }
 
-    impl<'de> serialize::Deserialize<'de> for StringName {
+    #[cfg_attr(published_docs, doc(cfg(feature = "serde")))]
+    impl<'de> Deserialize<'de> for StringName {
         #[inline]
         fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
         where

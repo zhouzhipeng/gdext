@@ -8,6 +8,7 @@
 use godot_ffi as sys;
 
 use crate::builtin::*;
+use crate::obj::EngineEnum;
 use crate::property::{builtin_type_string, Export, PropertyHintInfo, TypeStringHint, Var};
 use std::fmt;
 use std::marker::PhantomData;
@@ -242,6 +243,7 @@ impl<T: ArrayElement> Array<T> {
         // SAFETY: The array has type `T` and we're writing a value of type `T` to it.
         unsafe { self.as_inner_mut() }.push_front(value.to_variant());
     }
+
     /// Removes and returns the last element of the array. Returns `None` if the array is empty.
     ///
     /// _Godot equivalent: `pop_back`_
@@ -266,7 +268,7 @@ impl<T: ArrayElement> Array<T> {
         })
     }
 
-    /// Inserts a new element before the index. The index must be valid or the end of the array (`index == len()`).
+    /// ⚠️ Inserts a new element before the index. The index must be valid or the end of the array (`index == len()`).
     ///
     /// On large arrays, this method is much slower than [`push()`][Self::push], as it will move all the array's elements after the inserted element.
     /// The larger the array, the slower `insert()` will be.
@@ -286,12 +288,13 @@ impl<T: ArrayElement> Array<T> {
 
     /// ⚠️ Removes and returns the element at the specified index. Equivalent of `pop_at` in GDScript.
     ///
-    /// On large arrays, this method is much slower than `pop_back()` as it will move all the array's
+    /// On large arrays, this method is much slower than [`pop()`][Self::pop] as it will move all the array's
     /// elements after the removed element. The larger the array, the slower `remove()` will be.
     ///
     /// # Panics
     ///
     /// If `index` is out of bounds.
+    #[doc(alias = "pop_at")]
     pub fn remove(&mut self, index: usize) -> T {
         self.check_bounds(index);
 
@@ -304,7 +307,7 @@ impl<T: ArrayElement> Array<T> {
     ///
     /// If the value does not exist in the array, nothing happens. To remove an element by index, use [`remove()`][Self::remove] instead.
     ///
-    /// On large arrays, this method is much slower than [`pop_back()`][Self::pop_back], as it will move all the array's
+    /// On large arrays, this method is much slower than [`pop()`][Self::pop], as it will move all the array's
     /// elements after the removed element.
     pub fn erase(&mut self, value: &T) {
         // SAFETY: We don't write anything to the array.
@@ -756,7 +759,7 @@ impl<T: ArrayElement> Array<T> {
 //   as that is the callee's responsibility. Which we do by calling `std::mem::forget(array.clone())`.
 unsafe impl<T: ArrayElement> GodotFfi for Array<T> {
     fn variant_type() -> VariantType {
-        VariantType::Array
+        VariantType::ARRAY
     }
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
@@ -841,7 +844,7 @@ impl<T: ArrayElement> Clone for Array<T> {
 
 impl<T: ArrayElement + TypeStringHint> TypeStringHint for Array<T> {
     fn type_string() -> String {
-        format!("{}:{}", VariantType::Array as i32, T::type_string())
+        format!("{}:{}", VariantType::ARRAY.ord(), T::type_string())
     }
 }
 
@@ -862,12 +865,12 @@ impl<T: ArrayElement> Var for Array<T> {
 
     #[cfg(since_api = "4.2")]
     fn property_hint() -> PropertyHintInfo {
-        if T::Ffi::variant_type() == VariantType::Nil {
+        if T::Ffi::variant_type() == VariantType::NIL {
             return PropertyHintInfo::with_hint_none("");
         }
 
         PropertyHintInfo {
-            hint: crate::engine::global::PropertyHint::ARRAY_TYPE,
+            hint: crate::global::PropertyHint::ARRAY_TYPE,
             hint_string: T::godot_type_name().into(),
         }
     }
@@ -876,7 +879,7 @@ impl<T: ArrayElement> Var for Array<T> {
 impl<T: ArrayElement + TypeStringHint> Export for Array<T> {
     fn default_export_info() -> PropertyHintInfo {
         PropertyHintInfo {
-            hint: crate::engine::global::PropertyHint::TYPE_STRING,
+            hint: crate::global::PropertyHint::TYPE_STRING,
             hint_string: T::type_string().into(),
         }
     }
@@ -1193,7 +1196,7 @@ impl TypeInfo {
     }
 
     pub fn is_typed(&self) -> bool {
-        self.variant_type != VariantType::Nil
+        self.variant_type != VariantType::NIL
     }
 
     pub fn variant_type(&self) -> VariantType {
