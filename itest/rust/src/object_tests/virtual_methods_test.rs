@@ -9,19 +9,19 @@
 
 use crate::framework::{itest, TestContext};
 
-use godot::builtin::meta::ToGodot;
 use godot::builtin::{
     real, varray, Color, GString, PackedByteArray, PackedColorArray, PackedFloat32Array,
     PackedInt32Array, PackedStringArray, PackedVector2Array, PackedVector3Array, RealConv,
     StringName, Variant, VariantArray, Vector2, Vector3,
 };
-use godot::engine::notify::NodeNotification;
-use godot::engine::resource_loader::CacheMode;
-use godot::engine::{
+use godot::classes::notify::NodeNotification;
+use godot::classes::resource_loader::CacheMode;
+use godot::classes::{
     BoxMesh, INode, INode2D, IPrimitiveMesh, IRefCounted, IResourceFormatLoader, IRigidBody2D,
     InputEvent, InputEventAction, Node, Node2D, PrimitiveMesh, RefCounted, ResourceFormatLoader,
     ResourceLoader, Viewport, Window,
 };
+use godot::meta::ToGodot;
 use godot::obj::{Base, Gd, NewAlloc, NewGd};
 use godot::private::class_macros::assert_eq_approx;
 use godot::register::{godot_api, GodotClass};

@@ -9,7 +9,7 @@
 #![allow(clippy::non_minimal_cfg)]
 
 use crate::framework::itest;
-use godot::engine::ClassDb;
+use godot::classes::ClassDb;
 use godot::prelude::*;
 use godot::sys::static_assert;
 
@@ -135,7 +135,7 @@ impl HasOtherConstants {
 impl godot::obj::cap::ImplementsGodotApi for HasOtherConstants {
     fn __register_methods() {}
     fn __register_constants() {
-        use ::godot::builtin::meta::registration::constant::*;
+        use ::godot::register::private::constant::*;
         // Try exporting an enum.
         ExportConstant::new(
             HasOtherConstants::class_name(),

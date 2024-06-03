@@ -40,7 +40,7 @@
 //!
 //! 3. **Reference-counted types**: [`Array`][crate::builtin::Array],
 //!    [`Dictionary`][crate::builtin::Dictionary], and [`Gd<T>`][crate::obj::Gd] where `T` inherits
-//!    from [`RefCounted`][crate::engine::RefCounted].
+//!    from [`RefCounted`][crate::classes::RefCounted].
 //!
 //!    These types may share their underlying data between multiple instances: changes to one
 //!    instance are visible in another. They are conceptually similar to `Rc<RefCell<...>>`.
@@ -54,7 +54,7 @@
 //!    can be used to make actual copies. <br><br>
 //!
 //! 4. **Manually managed types**: [`Gd<T>`][crate::obj::Gd] where `T` inherits from
-//!    [`Object`][crate::engine::Object] but not from [`RefCounted`][crate::engine::RefCounted];
+//!    [`Object`][crate::classes::Object] but not from [`RefCounted`][crate::classes::RefCounted];
 //!    most notably, this includes all `Node` classes.
 //!
 //!    These also share data, but do not use reference counting to manage their memory. Instead,
@@ -160,7 +160,7 @@
 //!
 //! * **`experimental-godot-api`**
 //!
-//!   Access to `godot::engine` APIs that Godot marks "experimental". These are under heavy development and may change at any time.
+//!   Access to `godot::classes` APIs that Godot marks "experimental". These are under heavy development and may change at any time.
 //!   If you opt in to this feature, expect breaking changes at compile and runtime.<br><br>
 //!
 //! * **`experimental-wasm`**
@@ -223,10 +223,10 @@ const _: () = _validate_features();
 // Modules
 
 #[doc(inline)]
-pub use godot_core::{builtin, engine, extras, global, obj};
+pub use godot_core::{builtin, classes, global, meta, obj, tools};
 
 #[allow(deprecated)]
-pub use godot_core::log;
+pub use godot_core::{engine, log};
 
 #[doc(hidden)]
 pub use godot_core::sys;
@@ -241,8 +241,14 @@ pub mod init {
 
 /// Register/export Rust symbols to Godot: classes, methods, enums...
 pub mod register {
-    pub use godot_core::property;
+    pub use godot_core::registry::property;
     pub use godot_macros::{godot_api, Export, GodotClass, GodotConvert, Var};
+
+    /// Re-exports used by proc-macro API.
+    #[doc(hidden)]
+    pub mod private {
+        pub use godot_core::registry::{constant, method};
+    }
 }
 
 /// Testing facilities (unstable).

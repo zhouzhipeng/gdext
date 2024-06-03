@@ -12,7 +12,6 @@ use sys::types::OpaqueString;
 use sys::{ffi_methods, interface_fn, GodotFfi};
 
 use crate::builtin::inner;
-use crate::builtin::meta::impl_godot_as_self;
 
 use super::string_chars::validate_unicode_scalar_sequence;
 use super::{NodePath, StringName};
@@ -32,7 +31,7 @@ use super::{NodePath, StringName};
 ///
 /// When interfacing with the Godot engine API, you often have the choice between `String` and `GString`. In user-declared methods
 /// exposed to Godot through the `#[func]` attribute, both types can be used as parameters and return types, and conversions
-/// are done transparently. For auto-generated binding APIs in `godot::engine`, both parameters and return types are `GString`.
+/// are done transparently. For auto-generated binding APIs in `godot::classes`, both parameters and return types are `GString`.
 /// In the future, we will likely declare parameters as `impl Into<GString>`, allowing `String` or `&str` to be passed.
 ///
 /// As a general guideline, use `GString` if:
@@ -216,7 +215,7 @@ unsafe impl GodotFfi for GString {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-impl_godot_as_self!(GString);
+crate::meta::impl_godot_as_self!(GString);
 
 impl_builtin_traits! {
     for GString {

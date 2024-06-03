@@ -6,9 +6,9 @@
  */
 
 use crate::builder::ClassBuilder;
-use crate::builtin::meta::ClassName;
 use crate::builtin::GString;
 use crate::init::InitLevel;
+use crate::meta::ClassName;
 use crate::obj::{bounds, Base, BaseMut, BaseRef, Bounds, Gd};
 use crate::storage::Storage;
 
@@ -61,7 +61,7 @@ where
 
 /// Type representing the absence of a base class, at the root of the hierarchy.
 ///
-/// `NoBase` is used as the base class for exactly one class: [`Object`][crate::engine::Object].
+/// `NoBase` is used as the base class for exactly one class: [`Object`][crate::classes::Object].
 ///
 /// This is an enum without any variants, as we should never construct an instance of this class.
 pub enum NoBase {}
@@ -274,7 +274,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     /// ```
     ///
     /// However, we cannot call methods that require `&mut Base`, such as
-    /// [`Node::add_child()`](crate::engine::Node::add_child).
+    /// [`Node::add_child()`](crate::classes::Node::add_child).
     ///
     /// ```compile_fail
     /// use godot::prelude::*;
@@ -526,7 +526,7 @@ pub mod cap {
     #[doc(hidden)]
     pub trait GodotGetPropertyList: GodotClass {
         #[doc(hidden)]
-        fn __godot_get_property_list(&mut self) -> Vec<crate::builtin::meta::PropertyInfo>;
+        fn __godot_get_property_list(&mut self) -> Vec<crate::meta::PropertyInfo>;
     }
 
     #[doc(hidden)]
