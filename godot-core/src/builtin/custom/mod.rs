@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fmt::Display;
 use std::marker::PhantomData;
+use anyhow::anyhow;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::value::I64Deserializer;
 use serde::de::{Error, Visitor};
@@ -8,7 +9,7 @@ use crate::builtin::{Dictionary, GString, Variant};
 use crate::builtin::meta::{ConvertError, FromGodot, GodotConvert, ToGodot};
 use crate::classes::Texture2D;
 use crate::engine::{Area2D, IObject, Json, Object, StaticBody2D, Timer};
-use crate::global::instance_from_id;
+use crate::global::{instance_from_id, is_instance_id_valid};
 use crate::godot_print;
 use crate::obj::{Gd, GodotClass, Inherits};
 
@@ -76,8 +77,26 @@ impl<'de> Deserialize<'de> for Gd<$t> {
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where E: Error {
+                use serde::de::{self, Visitor, Unexpected};
+
                 let value = v.parse::<i64>().unwrap();
-                Ok(instance_from_id(value).unwrap().cast::<$t>())
+                if is_instance_id_valid(value){
+                    let r = instance_from_id(value).unwrap().try_cast::<$t>();
+                    match r{
+                        Ok(s)=>{
+                            return Ok(s);
+                        }
+                        Err(e)=>{
+                            return Err(de::Error::invalid_value(Unexpected::Str(v), &self));
+                        }
+                    }
+                }else{
+                   return Err(de::Error::invalid_value(Unexpected::Str(v), &self));
+                }
+
+                //      let value = v.parse::<i64>().unwrap();
+                // Ok(instance_from_id(value).unwrap().cast::<$t>())
+
             }
         }
 
