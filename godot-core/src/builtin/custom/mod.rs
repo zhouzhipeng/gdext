@@ -6,6 +6,7 @@ use serde::de::value::I64Deserializer;
 use serde::de::{Error, Visitor};
 use crate::builtin::{Dictionary, GString, Variant};
 use crate::builtin::meta::{ConvertError, FromGodot, GodotConvert, ToGodot};
+use crate::classes::Texture2D;
 use crate::engine::{Area2D, IObject, Json, Object, StaticBody2D, Timer};
 use crate::global::instance_from_id;
 use crate::godot_print;
@@ -90,3 +91,4 @@ impl<'de> Deserialize<'de> for Gd<$t> {
 impl_serialize_deserialize!(Area2D);
 impl_serialize_deserialize!(StaticBody2D);
 impl_serialize_deserialize!(Timer);
+impl_serialize_deserialize!(Texture2D);
