@@ -16,7 +16,7 @@ experimental-threads = ["godot-core/experimental-threads"]
 experimental-wasm = []
 formatted = ["godot-core/codegen-fmt"]
 lazy-function-tables = ["godot-core/codegen-lazy-fptrs"]
-serde = []
+serde = ["godot-core/serde"]
 
 api-custom = ["godot-core/api-custom"]
 # [version-sync] [[
