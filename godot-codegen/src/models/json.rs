@@ -8,7 +8,13 @@
 // TODO remove this warning once impl is complete
 // Several types have #[allow(dead_code)], can be subsequently removed.
 
-#![allow(clippy::question_mark)] // in #[derive(DeJson)]
+// In #[derive(DeJson)].
+#![allow(clippy::question_mark)]
+//
+// This file acts as deserialization check of the JSON file. Even if some fields are unused, having them declared makes sure they're
+// deserializable and conform to our expectations. It also doesn't add much value to annotate individual fields; it doesn't really
+// matter if some are unused because it's external input data.
+#![allow(dead_code)]
 
 use nanoserde::DeJson;
 
@@ -256,7 +262,6 @@ pub fn load_extension_api(watch: &mut godot_bindings::StopWatch) -> JsonExtensio
     // #[allow]: as_ref() acts as impl AsRef<str>, but with conditional compilation
 
     let json = godot_bindings::load_gdextension_json(watch);
-    #[allow(clippy::useless_asref)]
     let json_str: &str = json.as_ref();
 
     let model: JsonExtensionApi =

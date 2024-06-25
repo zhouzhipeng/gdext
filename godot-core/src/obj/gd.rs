@@ -46,7 +46,7 @@ use crate::{classes, out};
 /// - **Manual**<br>
 ///   Objects inheriting from [`Object`] which are not `RefCounted` (or inherited) are **manually-managed**.
 ///   Their destructor is not automatically called (unless they are part of the scene tree). Creating a `Gd<T>` means that
-///   you are responsible of explicitly deallocating such objects using [`free()`][Self::free].<br><br>
+///   you are responsible for explicitly deallocating such objects using [`free()`][Self::free].<br><br>
 ///
 /// - **Dynamic**<br>
 ///   For `T=Object`, the memory strategy is determined **dynamically**. Due to polymorphism, a `Gd<Object>` can point to either
@@ -71,13 +71,16 @@ use crate::{classes, out};
 /// * [`Gd::from_instance_id(id)`][Gd::from_instance_id] and [`Gd::try_from_instance_id(id)`][Gd::try_from_instance_id]
 ///   to obtain a pointer to an object which is already alive in the engine.
 ///
-/// # Binds
+/// # Bind guards
 ///
 /// The [`bind()`][Self::bind] and [`bind_mut()`][Self::bind_mut] methods allow you to obtain a shared or exclusive guard to the user instance.
 /// These provide interior mutability similar to [`RefCell`][std::cell::RefCell], with the addition that `Gd` simultaneously handles reference
 /// counting (for some types `T`).
 ///
-/// When you declare a `#[func]` method on your own class and it accepts `&self` or `&mut self`, an implicit `bind()` or `bind_mut()` call
+/// Holding a bind guard will prevent other code paths from obtaining their own shared/mutable bind. As such, you should drop the guard
+/// as soon as you don't need it anymore, by closing a `{ }` block or calling `std::mem::drop()`.
+///
+/// When you declare a `#[func]` method on your own class, and it accepts `&self` or `&mut self`, an implicit `bind()` or `bind_mut()` call
 /// on the owning `Gd<T>` is performed. This is important to keep in mind, as you can get into situations that violate dynamic borrow rules; for
 /// example if you are inside a `&mut self` method, make a call to GDScript and indirectly call another method on the same object (re-entrancy).
 ///
@@ -151,6 +154,8 @@ where
     /// `GodotClass` instance, independently of how many `Gd` smart pointers point to it. There are runtime
     /// checks to ensure that Rust safety rules (e.g. no `&` and `&mut` coexistence) are upheld.
     ///
+    /// Drop the guard as soon as you don't need it anymore. See also [Bind guards](#bind-guards).
+    ///
     /// # Panics
     /// * If another `Gd` smart pointer pointing to the same Rust instance has a live `GdMut` guard bound.
     /// * If there is an ongoing function call from GDScript to Rust, which currently holds a `&mut T`
@@ -166,6 +171,8 @@ where
     /// You can either have multiple `GdRef` shared guards, or a single `GdMut` exclusive guard to a Rust
     /// `GodotClass` instance, independently of how many `Gd` smart pointers point to it. There are runtime
     /// checks to ensure that Rust safety rules (e.g. no `&mut` aliasing) are upheld.
+    ///
+    /// Drop the guard as soon as you don't need it anymore. See also [Bind guards](#bind-guards).
     ///
     /// # Panics
     /// * If another `Gd` smart pointer pointing to the same Rust instance has a live `GdRef` or `GdMut` guard bound.
@@ -241,9 +248,11 @@ impl<T: GodotClass> Gd<T> {
     ///
     /// This method is safe and never panics.
     pub fn instance_id_unchecked(&self) -> InstanceId {
+        let instance_id = self.raw.instance_id_unchecked();
+
         // SAFETY: a `Gd` can only be created from a non-null `RawGd`, meaning `raw.instance_id_unchecked()` will
         // always return `Some`.
-        unsafe { self.raw.instance_id_unchecked().unwrap_unchecked() }
+        unsafe { instance_id.unwrap_unchecked() }
     }
 
     /// Checks if this smart pointer points to a live object (read description!).
@@ -293,12 +302,29 @@ impl<T: GodotClass> Gd<T> {
     ///     println!("Node name: {}", node.upcast_ref().get_name());
     /// }
     /// ```
+    ///
+    /// Note that this cannot be used to get a reference to Rust classes, for that you should use [`Gd::bind()`]. For instance this
+    /// will fail:
+    /// ```compile_fail
+    /// # use godot::prelude::*;
+    /// #[derive(GodotClass)]
+    /// #[class(init, base = Node)]
+    /// struct SomeClass {}
+    ///
+    /// #[godot_api]
+    /// impl INode for SomeClass {
+    ///     fn ready(&mut self) {
+    ///         let other = SomeClass::new_alloc();
+    ///         let _ = other.upcast_ref::<SomeClass>();
+    ///     }
+    /// }
+    /// ```
     pub fn upcast_ref<Base>(&self) -> &Base
     where
-        Base: GodotClass,
+        Base: GodotClass + Bounds<Declarer = bounds::DeclEngine>,
         T: Inherits<Base>,
     {
-        // SAFETY: valid upcast enforced by Inherits bound.
+        // SAFETY: `Base` is guaranteed to be an engine base class of `T` because of the generic bounds.
         unsafe { self.raw.as_upcast_ref::<Base>() }
     }
 
@@ -315,12 +341,29 @@ impl<T: GodotClass> Gd<T> {
     ///     node.upcast_mut().set_name(name.into());
     /// }
     /// ```
+    ///
+    /// Note that this cannot be used to get a mutable reference to Rust classes, for that you should use [`Gd::bind_mut()`]. For instance this
+    /// will fail:
+    /// ```compile_fail
+    /// # use godot::prelude::*;
+    /// #[derive(GodotClass)]
+    /// #[class(init, base = Node)]
+    /// struct SomeClass {}
+    ///
+    /// #[godot_api]
+    /// impl INode for SomeClass {
+    ///     fn ready(&mut self) {
+    ///         let mut other = SomeClass::new_alloc();
+    ///         let _ = other.upcast_mut::<SomeClass>();
+    ///     }
+    /// }
+    /// ```
     pub fn upcast_mut<Base>(&mut self) -> &mut Base
     where
-        Base: GodotClass,
+        Base: GodotClass + Bounds<Declarer = bounds::DeclEngine>,
         T: Inherits<Base>,
     {
-        // SAFETY: valid upcast enforced by Inherits bound.
+        // SAFETY: `Base` is guaranteed to be an engine base class of `T` because of the generic bounds.
         unsafe { self.raw.as_upcast_mut::<Base>() }
     }
 
@@ -378,6 +421,13 @@ impl<T: GodotClass> Gd<T> {
         }
     }
 
+    /// Returns a callable referencing a method from this object named `method_name`.
+    ///
+    /// This is shorter syntax for [`Callable::from_object_method(self, method_name)`][Callable::from_object_method].
+    pub fn callable<S: Into<StringName>>(&self, method_name: S) -> Callable {
+        Callable::from_object_method(self, method_name)
+    }
+
     pub(crate) unsafe fn from_obj_sys_or_none(
         ptr: sys::GDExtensionObjectPtr,
     ) -> Result<Self, ConvertError> {
@@ -414,13 +464,6 @@ impl<T: GodotClass> Gd<T> {
         T: Inherits<classes::ScriptLanguage>,
     {
         self.raw.script_sys()
-    }
-
-    /// Returns a callable referencing a method from this object named `method_name`.
-    ///
-    /// This is shorter syntax for [`Callable::from_object_method(self, method_name)`][Callable::from_object_method].
-    pub fn callable<S: Into<StringName>>(&self, method_name: S) -> Callable {
-        Callable::from_object_method(self, method_name)
     }
 }
 
@@ -776,4 +819,5 @@ impl<T: GodotClass> std::panic::UnwindSafe for Gd<T> {}
 impl<T: GodotClass> std::panic::RefUnwindSafe for Gd<T> {}
 
 #[deprecated = "Removed; see `Gd::try_to_unique()`"]
+#[doc(hidden)] // No longer advertise in API docs.
 pub type NotUniqueError = ();

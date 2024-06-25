@@ -139,12 +139,14 @@ pub(crate) fn to_isize(i: usize) -> isize {
 
 /// Specialized types related to arrays.
 #[deprecated = "Merged into `godot::builtin::iter`."]
+#[doc(hidden)] // No longer advertise in API docs.
 pub mod array {
     pub type Iter<'a, T> = super::iter::ArrayIter<'a, T>;
 }
 
 /// Specialized types related to dictionaries.
 #[deprecated = "Merged into `godot::builtin::iter`."]
+#[doc(hidden)] // No longer advertise in API docs.
 pub mod dictionary {
     pub type Iter<'a> = super::iter::DictIter<'a>;
     pub type Keys<'a> = super::iter::DictKeys<'a>;
@@ -153,6 +155,7 @@ pub mod dictionary {
 }
 
 #[deprecated = "Moved to `godot::meta` and submodules."]
+#[doc(hidden)] // No longer advertise in API docs.
 pub mod meta {
     pub use crate::meta::error::*;
     pub use crate::meta::*;
@@ -162,9 +165,11 @@ pub mod meta {
 ///
 /// _Godot equivalent: `@GlobalScope.Side`_
 #[deprecated = "Merged with `godot::builtin::Side`."]
+#[doc(hidden)] // No longer advertise in API docs.
 pub type RectSide = Side;
 
 #[allow(non_upper_case_globals)]
+#[doc(hidden)] // No longer advertise in API docs.
 impl Side {
     #[deprecated(note = "Renamed to `Side::LEFT`.")]
     pub const Left: Side = Side::LEFT;
