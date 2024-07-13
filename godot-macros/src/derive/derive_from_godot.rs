@@ -75,6 +75,7 @@ fn make_fromgodot_for_gstring_enum(name: &Ident, enum_: &CStyleEnum) -> TokenStr
     let names_str = names.iter().map(ToString::to_string).collect::<Vec<_>>();
     let bad_variant_error = format!("invalid {name} variant");
 
+    let first= &names[0];
     quote! {
         impl ::godot::meta::FromGodot for #name {
             fn try_from_godot(via: ::godot::builtin::GString) -> ::std::result::Result<Self, ::godot::meta::error::ConvertError> {
@@ -83,7 +84,8 @@ fn make_fromgodot_for_gstring_enum(name: &Ident, enum_: &CStyleEnum) -> TokenStr
                         #names_str => Ok(#name::#names),
                     )*
                     // Pass `via` and not `other`, to retain debug info of original type.
-                    other => Err(::godot::meta::error::ConvertError::with_error_value(#bad_variant_error, via))
+                    // other => Err(::godot::meta::error::ConvertError::with_error_value(#bad_variant_error, via))
+                    other => Ok(#name::#first)
                 }
             }
         }

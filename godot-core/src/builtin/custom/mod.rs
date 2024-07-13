@@ -57,12 +57,12 @@ impl<T> FromGodot for Anyhow<T> {
 }
 
 
-impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> GodotConvert for Vec<T>
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> GodotConvert for Vec<T>
 {
-    type Via = Array<i32>;
+    type Via = Array<GString>;
 }
 
-impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> ToGodot for Vec<T>{
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> ToGodot for Vec<T>{
     fn to_godot(&self) -> Self::Via {
         let mut array = Array::new();
         for x in self {
@@ -72,7 +72,7 @@ impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> ToGodot for Vec<T>{
     }
 }
 
-impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> FromGodot for  Vec<T>{
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> FromGodot for  Vec<T>{
     fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
         let mut ret = vec![];
         for x in via.iter_shared() {
@@ -82,7 +82,7 @@ impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> FromGodot for  Vec<T>
     }
 }
 
-impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> Var for  Vec<T>
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Var for  Vec<T>
 {
     fn get_property(&self) -> Self::Via {
         ToGodot::to_godot(self)
@@ -96,12 +96,12 @@ impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> Var for  Vec<T>
         PropertyHintInfo{
             hint: PropertyHint::ARRAY_TYPE,
             // "hint_string": str(TYPE_INT) + "/" + str(PROPERTY_HINT_ENUM) + ":" + ",".join(CustomEnum.keys())
-            hint_string: format!("2/2:{}",  T::property_hint().hint_string.to_string()).into(),
+            hint_string: format!("4/2:{}",  T::property_hint().hint_string.to_string()).into(),
         }
     }
 }
 
-impl<T:GodotConvert<Via =i32> + ToGodot + FromGodot + Var> Export for Vec<T>{
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Export for Vec<T>{
     fn default_export_info() -> PropertyHintInfo {
         Self::property_hint()
     }
