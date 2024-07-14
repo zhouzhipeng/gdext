@@ -31,12 +31,12 @@ use std::ops::{Mul, MulAssign};
 pub struct Transform2D {
     /// The first basis vector.
     ///
-    /// This is equivalent to the `x` field from godot.
+    /// _Godot equivalent: `Transform2D.x`_, see [`Basis`][crate::builtin::Basis] for why it's changed
     pub a: Vector2,
 
     /// The second basis vector.
     ///
-    /// This is equivalent to the `y` field from godot.
+    /// _Godot equivalent: `Transform2D.y`_, see [`Basis`][crate::builtin::Basis] for why it's changed
     pub b: Vector2,
 
     /// The origin of the transform. The coordinate space defined by this transform
@@ -71,7 +71,8 @@ impl Transform2D {
 
     /// Create a new `Transform2D` with the given column vectors.
     ///
-    /// _Godot equivalent: `Transform2D(Vector2 x_axis, Vector2 y_axis, Vector2 origin)`_
+    /// _Godot equivalent: `Transform2D(Vector2 x_axis, Vector2 y_axis, Vector2 origin)`_, see [`Basis`][crate::builtin::Basis] for why it's
+    /// changed
     pub const fn from_cols(a: Vector2, b: Vector2, origin: Vector2) -> Self {
         Self { a, b, origin }
     }
@@ -148,6 +149,18 @@ impl Transform2D {
     #[must_use]
     pub fn affine_inverse(&self) -> Self {
         self.glam(|aff| aff.inverse())
+    }
+
+    /// Returns the determinant of the basis matrix.
+    ///
+    /// If the basis is uniformly scaled, then its determinant equals the square of the scale factor.
+    ///
+    /// A negative determinant means the basis was flipped, so one part of the scale is negative.
+    /// A zero determinant means the basis isn't invertible, and is usually considered invalid.
+    ///
+    /// _Godot equivalent: `Transform2D.determinant()`_
+    pub fn determinant(&self) -> real {
+        self.basis().determinant()
     }
 
     /// Returns the transform's rotation (in radians).
@@ -291,6 +304,9 @@ impl Transform2D {
 }
 
 impl Display for Transform2D {
+    /// Formats the value with the given formatter.  [Read more](https://doc.rust-lang.org/1.79.0/core/fmt/trait.Display.html#tymethod.fmt)
+    ///
+    /// The output is similar to Godot's, but calls the columns a/b instead of X/Y.  See [`Basis`][crate::builtin::Basis] for why.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Godot output:
         // [X: (1, 2), Y: (3, 4), O: (5, 6)]
@@ -443,7 +459,7 @@ impl Basis2D {
     }
 
     /// Returns the determinant of the matrix.
-    pub(crate) fn determinant(&self) -> real {
+    pub fn determinant(&self) -> real {
         self.glam(|mat| mat.determinant())
     }
 
