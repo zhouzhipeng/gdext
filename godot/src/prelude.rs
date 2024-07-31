@@ -15,18 +15,12 @@ pub use super::builtin::math::FloatExt as _;
 pub use super::meta::error::{ConvertError, IoError};
 pub use super::meta::{FromGodot, GodotConvert, ToGodot};
 
-pub use super::classes::{
-    AudioStreamPlayer, Camera2D, Camera3D, IAudioStreamPlayer, ICamera2D, ICamera3D, INode,
-    INode2D, INode3D, IObject, IPackedScene, IRefCounted, IResource, ISceneTree, Input, Node,
-    Node2D, Node3D, Object, PackedScene, RefCounted, Resource, SceneTree,
-};
-pub use super::global::{
-    godot_error, godot_print, godot_print_rich, godot_script_error, godot_warn,
-};
+pub use super::classes::*;
+pub use super::global::*;
 pub use super::tools::{load, save, try_load, try_save, GFile};
 
 pub use super::init::{gdextension, ExtensionLibrary, InitLevel};
-pub use super::obj::{Base, Gd, GdMut, GdRef, GodotClass, Inherits, InstanceId, OnReady};
+pub use super::obj::{Base, Gd, GdMut, GdRef, GodotClass, Inherits, InstanceId, OnReady,Bounds, bounds};
 
 // Make trait methods available.
 pub use super::obj::EngineBitfield as _;
@@ -34,3 +28,4 @@ pub use super::obj::EngineEnum as _;
 pub use super::obj::NewAlloc as _;
 pub use super::obj::NewGd as _;
 pub use super::obj::WithBaseField as _; // base(), base_mut(), to_gd()
+pub use super::obj::Bounds as _;
