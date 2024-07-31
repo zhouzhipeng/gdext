@@ -13,6 +13,8 @@
 mod bench;
 mod class;
 mod derive;
+#[cfg(all(feature = "docs", since_api = "4.3"))]
+mod docs;
 mod gdextension;
 mod itest;
 mod util;
@@ -174,7 +176,7 @@ use crate::util::ident;
 /// ```
 /// # use godot::prelude::*;
 /// #[derive(GodotClass)]
-/// # #[class(init)]
+/// #[class(init)]
 /// struct MyStruct {
 ///     #[var(get = get_my_field, set = set_my_field)]
 ///     my_field: i64,
@@ -374,7 +376,7 @@ use crate::util::ident;
 ///
 /// ## Class renaming
 ///
-/// You may want to have structs with the same name. With Rust, this is allowed using `mod`. However in GDScript,
+/// You may want to have structs with the same name. With Rust, this is allowed using `mod`. However, in GDScript
 /// there are no modules, namespaces, or any such disambiguation.  Therefore, you need to change the names before they
 /// can get to Godot. You can use the `rename` key while defining your `GodotClass` for this.
 ///
@@ -443,6 +445,35 @@ use crate::util::ident;
 /// # impl godot::classes::INode for MyStruct {
 /// #     fn init(base: godot::obj::Base<Self::Base>) -> Self { todo!() }
 /// # }
+/// ```
+///
+/// <div class="stab portability">Available on <strong>crate feature <code>register-docs</code></strong> only.</div>
+/// <div class="stab portability">Available on <strong>Godot version <code>4.3+</code></strong> only.</div>
+///
+/// # Documentation
+///
+/// You can document your functions, classes, members, and signals with the `///` doc comment syntax.
+///
+/// ```no_run
+/// # use godot::prelude::*;
+/// #[derive(GodotClass)]
+/// # #[class(init)]
+/// /// This is an example struct for documentation, inside documentation.
+/// struct DocumentedStruct {
+///     /// This is a class member.
+///     /// You can use markdown formatting such as _italics_.
+///     #[var]
+///     item: f32,
+/// }
+///
+/// #[godot_api]
+/// impl DocumentedStruct {
+///     /// This provides the item, after adding `0.2`.
+///     #[func]
+///     pub fn produce_item(&self) -> f32 {
+///         self.item + 0.2
+///     }
+/// }
 /// ```
 #[proc_macro_derive(GodotClass, attributes(class, base, hint, var, export, init, signal))]
 pub fn derive_godot_class(input: TokenStream) -> TokenStream {
@@ -696,7 +727,7 @@ pub fn godot_api(_meta: TokenStream, input: TokenStream) -> TokenStream {
 /// assert_eq!(obj.to_godot(), GString::from("hello!"));
 /// ```
 ///
-/// However it will not work for structs with more than one field, even if that field is zero sized:
+/// However, it will not work for structs with more than one field, even if that field is zero sized:
 /// ```compile_fail
 /// use godot::prelude::*;
 ///
@@ -809,7 +840,7 @@ pub fn itest(meta: TokenStream, input: TokenStream) -> TokenStream {
     translate_meta("itest", meta, input, itest::attribute_itest)
 }
 
-/// Similar to `#[test]`, but runs an benchmark with Godot.
+/// Similar to `#[test]`, but runs a benchmark with Godot.
 ///
 /// Calls the `fn` many times and gathers statistics from its execution time.
 #[proc_macro_attribute]

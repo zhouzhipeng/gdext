@@ -18,10 +18,32 @@ use std::fmt;
 ///
 /// 4-element structure that can be used to represent 4D grid coordinates or sets of integers.
 ///
-/// It uses integer coordinates and is therefore preferable to [`Vector4`] when exact precision is
-/// required. Note that the values are limited to 32 bits, and unlike [`Vector4`] this cannot be
+/// `Vector4i` uses integer coordinates and is therefore preferable to [`Vector4`] when exact precision is
+/// required. Note that the values are limited to 32 bits, and unlike `Vector4` this cannot be
 /// configured with an engine build option. Use `i64` or [`PackedInt64Array`][crate::builtin::PackedInt64Array]
 /// if 64-bit values are needed.
+///
+#[doc = shared_vector_docs!()]
+///
+/// ### Navigation to `impl` blocks within this page
+///
+/// - [Constants](#constants)
+/// - [Constructors and general vector functions](#constructors-and-general-vector-functions)
+/// - [Specialized `Vector4i` functions](#specialized-vector4i-functions)
+/// - [4D functions](#4d-functions)
+/// - [Trait impls + operators](#trait-implementations)
+///
+/// # All vector types
+///
+/// | Dimension | Floating-point                       | Integer                                |
+/// |-----------|--------------------------------------|----------------------------------------|
+/// | 2D        | [`Vector2`][crate::builtin::Vector2] | [`Vector2i`][crate::builtin::Vector2i] |
+/// | 3D        | [`Vector3`][crate::builtin::Vector3] | [`Vector3i`][crate::builtin::Vector3i] |
+/// | 4D        | [`Vector4`][crate::builtin::Vector4] | **`Vector4i`**                         |
+///
+/// # Godot docs
+///
+/// [`Vector4i` (stable)](https://docs.godotengine.org/en/stable/classes/class_vector4i.html)
 #[derive(Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
@@ -39,27 +61,22 @@ pub struct Vector4i {
     pub w: i32,
 }
 
-impl_vector_operators!(Vector4i, i32, (x, y, z, w));
-
-impl_vector_consts!(Vector4i, i32);
-impl_integer_vector_consts!(Vector4i);
+/// # Constants
+impl Vector4i {
+    impl_vector_consts!(i32);
+    impl_integer_vector_consts!();
+}
 
 impl_vector_fns!(Vector4i, glam::IVec4, i32, (x, y, z, w));
-impl_vector4x_fns!(Vector4i, i32);
 
+/// # Specialized `Vector4i` functions
 impl Vector4i {
-    impl_integer_vector_fns!(x, y, z, w);
+    inline_impl_integer_vector_fns!(Vector4, x, y, z, w);
 
-    /// Constructs a new `Vector4i` from a [`Vector4`]. The floating point coordinates will be
-    /// truncated.
+    #[deprecated = "Moved to `Vector4::cast_int()`"]
     #[inline]
     pub const fn from_vector4(v: Vector4) -> Self {
-        Self {
-            x: v.x as i32,
-            y: v.y as i32,
-            z: v.z as i32,
-            w: v.w as i32,
-        }
+        v.cast_int()
     }
 
     /// Converts `self` to the corresponding [`real`] `glam` type.
@@ -80,6 +97,9 @@ impl Vector4i {
         inner::InnerVector4i::from_outer(self)
     }
 }
+
+impl_vector4x_fns!(Vector4i, i32);
+impl_vector_operators!(Vector4i, i32, (x, y, z, w));
 
 /// Formats the vector like Godot: `(x, y, z, w)`.
 impl fmt::Display for Vector4i {

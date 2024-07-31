@@ -15,6 +15,13 @@
 pub mod builder;
 pub mod builtin;
 pub mod classes;
+#[cfg(all(since_api = "4.3", feature = "docs"))]
+pub mod docs;
+#[doc(hidden)]
+pub mod possibly_docs {
+    #[cfg(all(since_api = "4.3", feature = "docs"))]
+    pub use crate::docs::*;
+}
 pub mod global;
 pub mod init;
 pub mod meta;
@@ -24,6 +31,12 @@ pub mod tools;
 
 mod storage;
 pub use godot_ffi as sys;
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Validations (see also godot/lib.rs)
+
+#[cfg(all(feature = "docs", before_api = "4.3"))]
+compile_error!("Generating editor docs for Rust symbols requires at least Godot 4.3.");
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Generated code
@@ -55,18 +68,3 @@ pub mod private;
 /// Re-export logging macro.
 #[doc(hidden)]
 pub use godot_ffi::out;
-
-// ----------------------------------------------------------------------------------------------------------------------------------------------
-// Deprecated modules
-
-#[deprecated = "Module has been split into `godot::classes`, `godot::global` and `godot::tools`."]
-#[doc(hidden)] // No longer advertise in API docs.
-pub mod engine;
-
-#[deprecated = "Print macros have been moved to `godot::global`."]
-#[doc(hidden)] // No longer advertise in API docs.
-pub mod log {
-    pub use crate::global::{
-        godot_error, godot_print, godot_print_rich, godot_script_error, godot_warn,
-    };
-}

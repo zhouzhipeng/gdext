@@ -15,6 +15,8 @@ pub struct Field {
     pub var: Option<FieldVar>,
     pub export: Option<FieldExport>,
     pub is_onready: bool,
+    #[cfg(feature = "docs")]
+    pub attributes: Vec<venial::Attribute>,
 }
 
 impl Field {
@@ -26,6 +28,8 @@ impl Field {
             var: None,
             export: None,
             is_onready: false,
+            #[cfg(feature = "docs")]
+            attributes: field.attributes.clone(),
         }
     }
 }
@@ -36,7 +40,4 @@ pub struct Fields {
 
     /// The field with type `Base<T>`, if available.
     pub base_field: Option<Field>,
-
-    /// Whether a deprecated `#[base]` was used.
-    pub has_deprecated_base: bool,
 }

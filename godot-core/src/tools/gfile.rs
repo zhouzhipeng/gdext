@@ -9,9 +9,9 @@ use crate::builtin::{real, GString, PackedByteArray, PackedStringArray, Variant}
 use crate::classes::file_access::{CompressionMode, ModeFlags};
 use crate::classes::FileAccess;
 use crate::global::Error;
+use crate::meta::error::IoError;
 use crate::obj::Gd;
 
-use crate::engine::IoError;
 use std::cmp;
 use std::io::{BufRead, ErrorKind, Read, Seek, SeekFrom, Write};
 
@@ -220,7 +220,7 @@ impl GFile {
     // ----------------------------------------------------------------------------------------------------------------------------------------------
     // Remaps of the internal FileAccess methods.
 
-    /// Get last modified time as an unix timestamp.
+    /// Get last modified time as a Unix timestamp.
     #[doc(alias = "get_modified_time")]
     pub fn modified_time(path: impl Into<GString>) -> std::io::Result<u64> {
         let modified_time = FileAccess::get_modified_time(path.into());

@@ -131,9 +131,9 @@ pub trait ScriptInstance: Sized {
 
     /// Lets the engine get a reference to the script this instance was created for.
     ///
-    /// This function has to return a reference, because Scripts are reference counted in Godot and it must be guaranteed that the object is
-    /// not freed before the engine increased the reference count. (every time a `Gd<T>` which contains a reference counted object is dropped the
-    /// reference count is decremented.)
+    /// This function has to return a reference, because scripts are reference-counted in Godot, and it must be guaranteed that the object is
+    /// not freed before the engine increased the reference count. (Every time a ref-counted `Gd<T>` is dropped, the reference count is
+    /// decremented.)
     fn get_script(&self) -> &Gd<Script>;
 
     /// Lets the engine fetch the type of a particular property.
@@ -155,10 +155,11 @@ pub trait ScriptInstance: Sized {
     /// Callback from the engine when the reference count of the base object has been increased.
     fn on_refcount_incremented(&self);
 
-    /// The engine may call this function if it failed to get a property value via [ScriptInstance::get_property] or the native types getter.
+    /// The engine may call this function if it failed to get a property value via [`ScriptInstance::get_property`] or the native type's getter.
     fn property_get_fallback(&self, name: StringName) -> Option<Variant>;
 
-    /// The engine may call this function if ScriptLanguage::is_placeholder_fallback_enabled is enabled.
+    /// The engine may call this function if
+    /// [`IScriptExtension::is_placeholder_fallback_enabled`](crate::classes::IScriptExtension::is_placeholder_fallback_enabled) is enabled.
     fn property_set_fallback(this: SiMut<Self>, name: StringName, value: &Variant) -> bool;
 }
 
@@ -251,7 +252,7 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
         property_can_revert_func: None, // unimplemented until needed.
         property_get_revert_func: None, // unimplemented until needed.
 
-        // ScriptInstance::get_owner() is apparently not called by Godot 4.0 to 4.2 (to verify).
+        // ScriptInstance::get_owner() is apparently not called by Godot 4.1 to 4.2 (to verify).
         get_owner_func: None,
         get_property_state_func: Some(script_instance_info::get_property_state_func::<T>),
 
@@ -471,7 +472,7 @@ mod bounded_ptr_list {
 
     use godot_ffi as sys;
 
-    /// Helper struct to store the lengths of lists so they can be properly freed.
+    /// Helper struct to store the lengths of lists, so they can be properly freed.
     ///
     /// This uses the term `list` because it refers to property/method lists in gdextension.
     pub struct BoundedPtrList<T> {
@@ -537,12 +538,12 @@ mod script_instance_info {
     use std::any::type_name;
     use std::ffi::c_void;
 
-    use crate::builtin::meta::{MethodInfo, PropertyInfo};
     use crate::builtin::{StringName, Variant};
     use crate::private::handle_panic;
     use crate::sys;
 
     use super::{ScriptInstance, ScriptInstanceData, SiMut};
+    use crate::meta::{MethodInfo, PropertyInfo};
     use sys::conv::{bool_to_sys, SYS_FALSE, SYS_TRUE};
 
     /// # Safety

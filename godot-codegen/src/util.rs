@@ -26,22 +26,17 @@ pub fn make_imports() -> TokenStream {
         use crate::meta::{ClassName, PtrcallSignatureTuple, VarcallSignatureTuple};
         use crate::classes::native::*;
         use crate::classes::Object;
-        use crate::obj::Gd;
+        use crate::obj::{Gd, ObjectArg, AsObjectArg};
         use crate::sys::GodotFfi as _;
     }
 }
 
 #[cfg(since_api = "4.2")]
 pub fn make_string_name(identifier: &str) -> TokenStream {
-    let lit = Literal::byte_string(format!("{identifier}\0").as_bytes());
-    quote! {
-        // TODO: C-string literals cannot currently be constructed in proc-macros, see the tracking issue:
-        // https://github.com/rust-lang/rust/issues/119750
-        {
-            #[allow(deprecated)]
-            StringName::from_latin1_with_nul(#lit)
-        }
-    }
+    let c_string = std::ffi::CString::new(identifier).expect("CString::new() failed");
+    let lit = Literal::c_string(&c_string);
+
+    quote! { StringName::from(#lit) }
 }
 
 #[cfg(before_api = "4.2")]
@@ -88,6 +83,7 @@ pub fn cstr_u8_slice(string: &str) -> Literal {
     Literal::byte_string(format!("{string}\0").as_bytes())
 }
 
+// This function is duplicated in godot-macros\src\util\mod.rs
 #[rustfmt::skip]
 pub fn safe_ident(s: &str) -> Ident {
     // See also: https://doc.rust-lang.org/reference/keywords.html

@@ -5,7 +5,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::util::{bail_fn, ident};
+use crate::util::{bail_fn, ident, safe_ident};
 use crate::{util, ParseResult};
 use proc_macro2::{Group, Ident, TokenStream, TokenTree};
 use quote::{format_ident, quote};
@@ -23,8 +23,7 @@ pub struct FuncDefinition {
 
 /// Returns a C function which acts as the callback when a virtual method of this instance is invoked.
 //
-// There are currently no virtual static methods. Additionally, virtual static methods don't really make a lot
-// of sense. Therefore, there is no need to support them.
+// Virtual methods are non-static by their nature; so there's no support for static ones.
 pub fn make_virtual_callback(
     class_name: &Ident,
     signature_info: SignatureInfo,
@@ -52,7 +51,10 @@ pub fn make_virtual_callback(
                 ret: sys::GDExtensionTypePtr,
             ) {
                 let call_ctx = #call_ctx;
-                #invocation;
+                let _success = ::godot::private::handle_ptrcall_panic(
+                    &call_ctx,
+                    || #invocation
+                );
             }
             Some(virtual_fn)
         }
@@ -366,7 +368,7 @@ pub(crate) fn maybe_rename_parameter(param_ident: Ident, next_unnamed_index: &mu
         // This could technically collide with another parameter of the same name (without "_"), but that's very unlikely and not
         // something we really need to support.
         // Note that the case of a single "_" is handled above.
-        ident(remain)
+        safe_ident(remain)
     } else {
         param_ident
     }

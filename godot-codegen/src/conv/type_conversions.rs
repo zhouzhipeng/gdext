@@ -76,12 +76,13 @@ fn to_hardcoded_rust_enum(ty: &str) -> Option<&str> {
         "enum::Variant.Type" => "VariantType",
         "enum::Variant.Operator" => "VariantOperator",
         "enum::Vector3.Axis" => "Vector3Axis",
+        "enum::Vector3i.Axis" => "Vector3Axis",
         _ => return None,
     };
     Some(result)
 }
 
-/// Maps an input type to a Godot type with the same C representation. This is subtly different than [`to_rust_type`],
+/// Maps an input type to a Godot type with the same C representation. This is subtly different from [`to_rust_type`],
 /// which maps to an appropriate corresponding Rust type. This function should be used in situations where the C ABI for
 /// a type must match the Godot equivalent exactly, such as when dealing with pointers.
 pub(crate) fn to_rust_type_abi(ty: &str, ctx: &mut Context) -> (RustTy, bool) {
@@ -104,7 +105,7 @@ pub(crate) fn to_rust_type_abi(ty: &str, ctx: &mut Context) -> (RustTy, bool) {
     (ty, is_obj)
 }
 
-/// Maps an _input_ type from the Godot JSON to the corresponding Rust type (wrapping some sort of a token stream).
+/// Maps an _input_ type from the Godot JSON to the corresponding Rust type (wrapping some sort of token stream).
 ///
 /// Uses an internal cache (via `ctx`), as several types are ubiquitous.
 // TODO take TyName as input
@@ -231,8 +232,12 @@ fn to_rust_type_uncached(full_ty: &GodotTy, ctx: &mut Context) -> RustTy {
         RustTy::BuiltinIdent(rustify_ty(ty))
     } else {
         let ty = rustify_ty(ty);
+        let qualified_class = quote! { crate::classes::#ty };
+
         RustTy::EngineClass {
-            tokens: quote! { Gd<crate::classes::#ty> },
+            tokens: quote! { Gd<#qualified_class> },
+            arg_view: quote! { ObjectArg<#qualified_class> },
+            impl_as_arg: quote! { impl AsObjectArg<#qualified_class> },
             inner_class: ty,
         }
     }
@@ -261,7 +266,7 @@ fn to_rust_expr_inner(expr: &str, ty: &RustTy, is_inner: bool) -> TokenStream {
             return match ty {
                 RustTy::BuiltinIdent(ident) if ident == "Variant" => quote! { Variant::nil() },
                 RustTy::EngineClass { .. } => {
-                    quote! { unimplemented!("see https://github.com/godot-rust/gdext/issues/156") }
+                    quote! { ObjectArg::null() }
                 }
                 _ => panic!("null not representable in target type {ty:?}"),
             }
@@ -400,7 +405,7 @@ fn to_rust_expr_inner(expr: &str, ty: &RustTy, is_inner: bool) -> TokenStream {
 }
 
 fn suffixed_lit(num: impl fmt::Display, suffix: &Ident) -> TokenStream {
-    // i32, u16 etc happens to be also the literal suffix
+    // i32, u16 etc. happen to be also the literal suffixes
     let combined = format!("{num}{suffix}");
     combined
         .parse::<Literal>()

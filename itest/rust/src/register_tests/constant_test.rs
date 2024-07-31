@@ -166,6 +166,7 @@ impl godot::obj::cap::ImplementsGodotApi for HasOtherConstants {
     }
 }
 
+// TODO once this is done via proc-macro, remove `register-docs` feature from itest, and update CI workflows.
 godot::sys::plugin_add!(
     __GODOT_PLUGIN_REGISTRY in ::godot::private;
     ::godot::private::ClassPlugin {
@@ -174,6 +175,8 @@ godot::sys::plugin_add!(
             register_methods_constants_fn: ::godot::private::ErasedRegisterFn {
                 raw: ::godot::private::callbacks::register_user_methods_constants::<HasOtherConstants>,
             },
+            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
+            docs: None,
         },
         init_level: HasOtherConstants::INIT_LEVEL,
     }
@@ -182,7 +185,7 @@ godot::sys::plugin_add!(
 macro_rules! test_enum_export {
     (
         $class:ty, $enum_name:ident, [$($enumerators:ident),* $(,)?];
-        // Include the `attr` here to so we can easily do things like `#[itest(focus)]`.
+        // Include the `attr` here to, so we can easily do things like `#[itest(focus)]`.
         #$attr:tt
         fn $test_name:ident() { .. }
     ) => {

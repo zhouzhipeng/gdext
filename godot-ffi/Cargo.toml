@@ -1,6 +1,6 @@
 [package]
 name = "godot-ffi"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.78"
 license = "MPL-2.0"
@@ -15,16 +15,12 @@ codegen-rustfmt = ["godot-codegen/codegen-rustfmt"]
 codegen-lazy-fptrs = ["godot-codegen/codegen-lazy-fptrs"]
 experimental-godot-api = ["godot-codegen/experimental-godot-api"]
 experimental-threads = []
+experimental-wasm-nothreads = ["godot-bindings/experimental-wasm-nothreads"]
 debug-log = []
 
 api-custom = ["godot-bindings/api-custom"]
 # [version-sync] [[
 #  [line] api-$kebabVersion = ["godot-bindings/api-$kebabVersion"]
-api-4-0 = ["godot-bindings/api-4-0"]
-api-4-0-1 = ["godot-bindings/api-4-0-1"]
-api-4-0-2 = ["godot-bindings/api-4-0-2"]
-api-4-0-3 = ["godot-bindings/api-4-0-3"]
-api-4-0-4 = ["godot-bindings/api-4-0-4"]
 api-4-1 = ["godot-bindings/api-4-1"]
 api-4-1-1 = ["godot-bindings/api-4-1-1"]
 api-4-1-2 = ["godot-bindings/api-4-1-2"]
@@ -48,8 +44,8 @@ libc = "0.2.153"
 gensym = "0.1.1"
 
 [build-dependencies]
-godot-bindings = { path = "../godot-bindings", version = "=0.1.1" }
-godot-codegen = { path = "../godot-codegen", version = "=0.1.1" }
+godot-bindings = { path = "../godot-bindings", version = "=0.1.3" }
+godot-codegen = { path = "../godot-codegen", version = "=0.1.3" }
 
 # https://docs.rs/about/metadata
 [package.metadata.docs.rs]

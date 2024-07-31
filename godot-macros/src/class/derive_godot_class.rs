@@ -35,6 +35,14 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     let is_editor_plugin = struct_cfg.is_editor_plugin;
     let is_hidden = struct_cfg.is_hidden;
     let base_ty = &struct_cfg.base_ty;
+    #[cfg(all(feature = "docs", since_api = "4.3"))]
+    let docs = crate::docs::make_definition_docs(
+        base_ty.to_string(),
+        &class.attributes,
+        &fields.all_fields,
+    );
+    #[cfg(not(all(feature = "docs", since_api = "4.3")))]
+    let docs = quote! {};
     let base_class = quote! { ::godot::classes::#base_ty };
     let base_class_name_obj = util::class_name_obj(&base_class);
     let inherits_macro = format_ident!("unsafe_inherits_transitive_{}", base_ty);
@@ -55,12 +63,6 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
             }
         }
     } else {
-        quote! {}
-    };
-
-    let deprecated_base_warning = if fields.has_deprecated_base {
-        quote! { ::godot::__deprecated::emit_deprecated_warning!(base_attribute); }
-    } else {
         TokenStream::new()
     };
 
@@ -75,7 +77,7 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
 
     match struct_cfg.init_strategy {
         InitStrategy::Generated => {
-            godot_init_impl = make_godot_init_impl(class_name, fields);
+            godot_init_impl = make_godot_init_impl(class_name, &fields);
             create_fn = quote! { Some(#prv::callbacks::create::<#class_name>) };
 
             if cfg!(since_api = "4.2") {
@@ -142,6 +144,7 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
                 is_editor_plugin: #is_editor_plugin,
                 is_hidden: #is_hidden,
                 is_instantiable: #is_instantiable,
+                #docs
             },
             init_level: {
                 let level = <#class_name as ::godot::obj::GodotClass>::INIT_LEVEL;
@@ -161,7 +164,6 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         });
 
         #prv::class_macros::#inherits_macro!(#class_name);
-        #deprecated_base_warning
     })
 }
 
@@ -193,17 +195,18 @@ struct ClassAttributes {
     rename: Option<Ident>,
 }
 
-fn make_godot_init_impl(class_name: &Ident, fields: Fields) -> TokenStream {
-    let base_init = if let Some(Field { name, .. }) = fields.base_field {
+fn make_godot_init_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
+    let base_init = if let Some(Field { name, .. }) = &fields.base_field {
         quote! { #name: base, }
     } else {
         TokenStream::new()
     };
 
-    let rest_init = fields.all_fields.into_iter().map(|field| {
-        let field_name = field.name;
+    let rest_init = fields.all_fields.iter().map(|field| {
+        let field_name = field.name.clone();
         let value_expr = field
             .default
+            .clone()
             .unwrap_or_else(|| quote! { ::std::default::Default::default() });
 
         quote! { #field_name: #value_expr, }
@@ -226,15 +229,29 @@ fn make_user_class_impl(
     is_tool: bool,
     all_fields: &[Field],
 ) -> (TokenStream, bool) {
-    let onready_field_inits = all_fields
-        .iter()
-        .filter(|&field| field.is_onready)
-        .map(|field| {
-            let field = &field.name;
+    let onready_inits = {
+        let mut onready_fields = all_fields
+            .iter()
+            .filter(|&field| field.is_onready)
+            .map(|field| {
+                let field = &field.name;
+                quote! {
+                    ::godot::private::auto_init(&mut self.#field, &base);
+                }
+            });
+
+        if let Some(first) = onready_fields.next() {
             quote! {
-                ::godot::private::auto_init(&mut self.#field);
+                {
+                    let base = <Self as godot::obj::WithBaseField>::to_gd(self).upcast();
+                    #first
+                    #( #onready_fields )*
+                }
             }
-        });
+        } else {
+            TokenStream::new()
+        }
+    };
 
     let default_virtual_fn = if all_fields.iter().any(|field| field.is_onready) {
         let tool_check = util::make_virtual_tool_check();
@@ -267,7 +284,7 @@ fn make_user_class_impl(
             }
 
             fn __before_ready(&mut self) {
-                #( #onready_field_inits )*
+                #onready_inits
             }
 
             #default_virtual_fn
@@ -307,8 +324,6 @@ fn parse_struct_attributes(class: &venial::Struct) -> ParseResult<ClassAttribute
 
         // #[class(editor_plugin)]
         if let Some(attr_key) = parser.handle_alone_with_span("editor_plugin")? {
-            require_api_version!("4.1", &attr_key, "#[class(editor_plugin)]")?;
-
             is_editor_plugin = true;
 
             // Requires #[class(tool, base=EditorPlugin)].
@@ -375,7 +390,6 @@ fn parse_fields(
 ) -> ParseResult<Fields> {
     let mut all_fields = vec![];
     let mut base_field = Option::<Field>::None;
-    let mut has_deprecated_base = false;
 
     // Attributes on struct fields
     for (named_field, _punct) in named_fields {
@@ -384,12 +398,6 @@ fn parse_fields(
 
         // Base<T> type inference
         if path_ends_with_complex(&field.ty, "Base") {
-            is_base = true;
-        }
-
-        // deprecated #[base]
-        if KvParser::parse(&named_field.attributes, "base")?.is_some() {
-            has_deprecated_base = true;
             is_base = true;
         }
 
@@ -409,8 +417,37 @@ fn parse_fields(
             }
 
             // #[init(default = expr)]
-            let default = parser.handle_expr("default")?;
-            field.default = default;
+            if let Some(default) = parser.handle_expr("default")? {
+                field.default = Some(default);
+            }
+
+            // #[init(node = "NodePath")]
+            if let Some(node_path) = parser.handle_expr("node")? {
+                if !field.is_onready {
+                    return bail!(
+                        parser.span(),
+                        "The key `node` in attribute #[init] requires field of type `OnReady<T>`\n\
+				         Help: The syntax #[init(node = \"NodePath\")] is equivalent to \
+				         #[init(default = OnReady::node(\"NodePath\"))], \
+				         which can only be assigned to fields of type `OnReady<T>`"
+                    );
+                }
+
+                if field.default.is_some() {
+                    return bail!(
+				        parser.span(),
+				        "The key `node` in attribute #[init] is mutually exclusive with the key `default`\n\
+				         Help: The syntax #[init(node = \"NodePath\")] is equivalent to \
+				         #[init(default = OnReady::node(\"NodePath\"))], \
+				         both aren't allowed since they would override each other"
+			        );
+                }
+
+                field.default = Some(quote! {
+                    OnReady::node(#node_path)
+                });
+            }
+
             parser.finish()?;
         }
 
@@ -470,7 +507,6 @@ fn parse_fields(
     Ok(Fields {
         all_fields,
         base_field,
-        has_deprecated_base,
     })
 }
 

@@ -22,9 +22,13 @@ use sys::{ffi_methods, GodotFfi};
 /// also be a custom callable, which is usually created from `bind`, `unbind`, or a GDScript lambda. See
 /// [`Callable::is_custom`].
 ///
-/// Currently it is impossible to use `bind` and `unbind` in GDExtension, see [godot-cpp#802].
+/// Currently, it is impossible to use `bind` and `unbind` in GDExtension, see [godot-cpp#802].
 ///
 /// [godot-cpp#802]: https://github.com/godotengine/godot-cpp/issues/802
+///
+/// # Godot docs
+///
+/// [`Callable` (stable)](https://docs.godotengine.org/en/stable/classes/class_callable.html)
 pub struct Callable {
     opaque: sys::types::OpaqueCallable,
 }
@@ -47,7 +51,7 @@ impl Callable {
         // upcast not needed
         let method = method_name.into();
         unsafe {
-            sys::new_with_uninit_or_init::<Self>(|self_ptr| {
+            Self::new_with_uninit(|self_ptr| {
                 let ctor = sys::builtin_fn!(callable_from_object_method);
                 let raw = object.to_ffi();
                 let args = [raw.as_arg_ptr(), method.sys()];
@@ -145,7 +149,7 @@ impl Callable {
         }
     }
 
-    /// Creates an invalid/empty object that is not able to be called.
+    /// Creates an invalid/empty object that cannot be called.
     ///
     /// _Godot equivalent: `Callable()`_
     pub fn invalid() -> Self {

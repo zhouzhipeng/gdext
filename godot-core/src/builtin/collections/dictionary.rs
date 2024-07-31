@@ -73,6 +73,10 @@ use std::{fmt, ptr};
 /// # Thread safety
 ///
 /// The same principles apply as for [`VariantArray`]. Consult its documentation for details.
+///
+/// # Godot docs
+///
+/// [`Dictionary` (stable)](https://docs.godotengine.org/en/stable/classes/class_dictionary.html)
 pub struct Dictionary {
     opaque: OpaqueDictionary,
 }
@@ -333,7 +337,7 @@ impl Dictionary {
 
 // SAFETY:
 // - `move_return_ptr`
-//   Nothing special needs to be done beyond a `std::mem::swap` when returning an Dictionary.
+//   Nothing special needs to be done beyond a `std::mem::swap` when returning a Dictionary.
 //   So we can just use `ffi_methods`.
 //
 // - `from_arg_ptr`
