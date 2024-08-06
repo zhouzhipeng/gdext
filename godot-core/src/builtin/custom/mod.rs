@@ -1,9 +1,9 @@
 use std::fmt::Display;
 use crate::builtin::{Array, GString};
 use crate::global::PropertyHint;
-use crate::meta::{FromGodot, GodotConvert, ToGodot};
+use crate::meta::{FromGodot, GodotConvert, PropertyHintInfo, ToGodot};
 use crate::meta::error::ConvertError;
-use crate::registry::property::{Export, PropertyHintInfo, Var};
+use crate::registry::property::{Export, Var};
 
 impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> GodotConvert for Vec<T>
 {
@@ -43,7 +43,7 @@ impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Var for  Vec<T>
         PropertyHintInfo{
             hint: PropertyHint::ARRAY_TYPE,
             // "hint_string": str(TYPE_INT) + "/" + str(PROPERTY_HINT_ENUM) + ":" + ",".join(CustomEnum.keys())
-            hint_string: format!("4/2:{}",  T::property_hint().hint_string.to_string()).into(),
+            hint_string: format!("4/2:{}",  T::var_hint().hint_string.to_string()).into(),
         }
     }
 }
