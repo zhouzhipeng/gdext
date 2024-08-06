@@ -39,8 +39,7 @@ impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Var for  Vec<T>
     fn set_property(&mut self, value: Self::Via) {
         *self = FromGodot::from_godot(value);
     }
-    fn property_hint() -> PropertyHintInfo {
-
+    fn var_hint() -> PropertyHintInfo {
         PropertyHintInfo{
             hint: PropertyHint::ARRAY_TYPE,
             // "hint_string": str(TYPE_INT) + "/" + str(PROPERTY_HINT_ENUM) + ":" + ",".join(CustomEnum.keys())
@@ -50,7 +49,8 @@ impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Var for  Vec<T>
 }
 
 impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Export for Vec<T>{
-    fn default_export_info() -> PropertyHintInfo {
-        Self::property_hint()
+    fn export_hint() -> PropertyHintInfo {
+
+        Self::var_hint()
     }
 }
