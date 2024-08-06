@@ -9,9 +9,7 @@
 
 use godot_ffi as sys;
 
-use crate::builtin::GString;
-use crate::global::PropertyHint;
-use crate::meta::{FromGodot, GodotConvert, GodotType, ToGodot};
+use crate::meta::{ClassName, FromGodot, GodotConvert, GodotType, PropertyHintInfo, ToGodot};
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Trait definitions
@@ -24,8 +22,8 @@ use crate::meta::{FromGodot, GodotConvert, GodotType, ToGodot};
 /// This does not require [`FromGodot`] or [`ToGodot`], so that something can be used as a property even if it can't be used in function
 /// arguments/return types.
 
-// We also mention #[export] here, because we can't control the order of error messages. Missing Export often also means missing Var trait,
-// and so the Var error message appears first.
+// on_unimplemented: we also mention #[export] here, because we can't control the order of error messages.
+// Missing Export often also means missing Var trait, and so the Var error message appears first.
 #[diagnostic::on_unimplemented(
     message = "`#[var]` properties require `Var` trait; #[export] ones require `Export` trait",
     label = "type cannot be used as a property",
@@ -33,15 +31,20 @@ use crate::meta::{FromGodot, GodotConvert, GodotType, ToGodot};
 )]
 pub trait Var: GodotConvert {
     fn get_property(&self) -> Self::Via;
+
     fn set_property(&mut self, value: Self::Via);
 
-    fn property_hint() -> PropertyHintInfo {
-        PropertyHintInfo::with_hint_none("")
+    /// Specific property hints, only override if they deviate from [`GodotType::property_info`], e.g. for enums/newtypes.
+    fn var_hint() -> PropertyHintInfo {
+        Self::Via::property_hint_info()
     }
 }
 
 /// Trait implemented for types that can be used as `#[export]` fields.
-// Mentioning both Var + Export: see above.
+///
+/// `Export` is only implemented for objects `Gd<T>` if either `T: Inherits<Node>` or `T: Inherits<Resource>`, just like GDScript.
+/// This means you cannot use `#[export]` with `Gd<RefCounted>`, for example.
+// on_unimplemented: mentioning both Var + Export; see above.
 #[diagnostic::on_unimplemented(
     message = "`#[var]` properties require `Var` trait; #[export] ones require `Export` trait",
     label = "type cannot be used as a property",
@@ -49,31 +52,21 @@ pub trait Var: GodotConvert {
 )]
 pub trait Export: Var {
     /// The export info to use for an exported field of this type, if no other export info is specified.
-    fn default_export_info() -> PropertyHintInfo;
-}
+    fn export_hint() -> PropertyHintInfo {
+        <Self as Var>::var_hint()
+    }
 
-/// Marks types that are registered via "type string hint" in Godot.
-///
-/// See [`PropertyHint::TYPE_STRING`] and [upstream docs].
-///
-/// [upstream docs]: https://docs.godotengine.org/en/stable/classes/class_%40globalscope.html#enum-globalscope-propertyhint
-pub trait TypeStringHint {
-    /// Returns the representation of this type as a type string.
+    /// If this is a class inheriting `Node`, returns the `ClassName`; otherwise `None`.
     ///
-    /// See [`PropertyHint.PROPERTY_HINT_TYPE_STRING`](
-    ///     https://docs.godotengine.org/en/stable/classes/class_%40globalscope.html#enum-globalscope-propertyhint
-    /// ).
-    fn type_string() -> String;
+    /// Only overridden for `Gd<T>`, to detect erroneous exports of `Node` inside a `Resource` class.
+    #[allow(clippy::wrong_self_convention)]
+    fn as_node_class() -> Option<ClassName> {
+        None
+    }
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Blanket impls for Option<T>
-
-impl<T: TypeStringHint> TypeStringHint for Option<T> {
-    fn type_string() -> String {
-        T::type_string()
-    }
-}
 
 impl<T> Var for Option<T>
 where
@@ -103,39 +96,13 @@ where
     T: Export,
     Option<T>: Var,
 {
-    fn default_export_info() -> PropertyHintInfo {
-        T::default_export_info()
+    fn export_hint() -> PropertyHintInfo {
+        T::export_hint()
     }
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Export machinery
-
-/// Info needed by Godot, for how to export a type to the editor.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct PropertyHintInfo {
-    pub hint: PropertyHint,
-    pub hint_string: GString,
-}
-
-impl PropertyHintInfo {
-    /// Create a new `PropertyHintInfo` with a property hint of [`PROPERTY_HINT_NONE`](PropertyHint::NONE).
-    ///
-    /// Starting with Godot version 4.3, the hint string will always be the empty string. Before that, the hint string is set to
-    /// be `type_name`.
-    pub fn with_hint_none(type_name: impl Into<GString>) -> Self {
-        let hint_string = if sys::GdextBuild::since_api("4.3") {
-            GString::new()
-        } else {
-            type_name.into()
-        };
-
-        Self {
-            hint: PropertyHint::NONE,
-            hint_string,
-        }
-    }
-}
 
 /// Functions used to translate user-provided arguments into export hints.
 ///
@@ -146,8 +113,7 @@ impl PropertyHintInfo {
 pub mod export_info_functions {
     use crate::builtin::GString;
     use crate::global::PropertyHint;
-
-    use super::PropertyHintInfo;
+    use crate::meta::PropertyHintInfo;
 
     /// Turn a list of variables into a comma separated string containing only the identifiers corresponding
     /// to a true boolean variable.
@@ -399,13 +365,11 @@ mod export_impls {
     macro_rules! impl_property_by_godot_convert {
         ($Ty:ty, no_export) => {
             impl_property_by_godot_convert!(@property $Ty);
-            impl_property_by_godot_convert!(@type_string_hint $Ty);
         };
 
         ($Ty:ty) => {
             impl_property_by_godot_convert!(@property $Ty);
             impl_property_by_godot_convert!(@export $Ty);
-            impl_property_by_godot_convert!(@type_string_hint $Ty);
         };
 
         (@property $Ty:ty) => {
@@ -422,19 +386,11 @@ mod export_impls {
 
         (@export $Ty:ty) => {
             impl Export for $Ty {
-                fn default_export_info() -> PropertyHintInfo {
-                    PropertyHintInfo::with_hint_none(<$Ty as $crate::meta::GodotType>::godot_type_name())
+                fn export_hint() -> PropertyHintInfo {
+                    PropertyHintInfo::type_name::<$Ty>()
                 }
             }
         };
-
-        (@type_string_hint $Ty:ty) => {
-            impl TypeStringHint for $Ty {
-                fn type_string() -> String {
-                    builtin_type_string::<$Ty>()
-                }
-            }
-        }
     }
 
     // Bounding Boxes
@@ -467,8 +423,11 @@ mod export_impls {
 
     impl_property_by_godot_convert!(Color);
 
-    // Arrays
-    // We manually implement `Export`.
+    // Dictionary: will need to be done manually once they become typed.
+    impl_property_by_godot_convert!(Dictionary);
+    impl_property_by_godot_convert!(Variant);
+
+    // Packed arrays: we manually implement `Export`.
     impl_property_by_godot_convert!(PackedByteArray, no_export);
     impl_property_by_godot_convert!(PackedInt32Array, no_export);
     impl_property_by_godot_convert!(PackedInt64Array, no_export);

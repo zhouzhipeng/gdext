@@ -15,13 +15,16 @@ use sys::{static_assert_eq_size_align, VariantType};
 use crate::builtin::{Callable, NodePath, StringName, Variant};
 use crate::global::PropertyHint;
 use crate::meta::error::{ConvertError, FromFfiError};
-use crate::meta::{ArrayElement, CallContext, FromGodot, GodotConvert, GodotType, ToGodot};
+use crate::meta::{
+    ArrayElement, CallContext, ClassName, FromGodot, GodotConvert, GodotType, PropertyHintInfo,
+    ToGodot,
+};
 use crate::obj::{
     bounds, cap, Bounds, EngineEnum, GdDerefTarget, GdMut, GdRef, GodotClass, Inherits, InstanceId,
     RawGd,
 };
 use crate::private::callbacks;
-use crate::registry::property::{Export, PropertyHintInfo, TypeStringHint, Var};
+use crate::registry::property::{Export, Var};
 use crate::{classes, out};
 
 /// Smart pointer to objects owned by the Godot engine.
@@ -374,9 +377,8 @@ impl<T: GodotClass> Gd<T> {
 
     /// **Downcast:** try to convert into a smart pointer to a derived class.
     ///
-    /// If `T`'s dynamic type is not `Derived` or one of its subclasses, `None` is returned
-    /// and the reference is dropped. Otherwise, `Some` is returned and the ownership is moved
-    /// to the returned value.
+    /// If `T`'s dynamic type is not `Derived` or one of its subclasses, `Err(self)` is returned, meaning you can reuse the original
+    /// object for further casts.
     pub fn try_cast<Derived>(self) -> Result<Gd<Derived>, Self>
     where
         Derived: GodotClass + Inherits<T>,
@@ -639,12 +641,11 @@ where
     ///
     /// # Example
     /// ```no_run
-    /// # fn some_shape() -> Gd<GltfPhysicsShape> { unimplemented!() }
+    /// # fn some_node() -> Gd<Node> { unimplemented!() }
     /// use godot::prelude::*;
-    /// use godot::classes::GltfPhysicsShape;
     ///
-    /// let mut shape: Gd<GltfPhysicsShape> = some_shape();
-    /// shape.set_importer_mesh(Gd::null_arg());
+    /// let mut shape: Gd<Node> = some_node();
+    /// shape.set_owner(Gd::null_arg());
     pub fn null_arg() -> crate::obj::ObjectNullArg<T> {
         crate::obj::ObjectNullArg(std::marker::PhantomData)
     }
@@ -735,8 +736,38 @@ impl<T: GodotClass> GodotType for Gd<T> {
     }
 }
 
-impl<T: GodotClass> ArrayElement for Gd<T> {}
-impl<T: GodotClass> ArrayElement for Option<Gd<T>> {}
+impl<T: GodotClass> ArrayElement for Gd<T> {
+    fn element_type_string() -> String {
+        // See also impl Export for Gd<T>.
+
+        let hint = if T::inherits::<classes::Resource>() {
+            Some(PropertyHint::RESOURCE_TYPE)
+        } else if T::inherits::<classes::Node>() {
+            Some(PropertyHint::NODE_TYPE)
+        } else {
+            None
+        };
+
+        // Exportable classes (Resource/Node based) include the {RESOURCE|NODE}_TYPE hint + the class name.
+        if let Some(export_hint) = hint {
+            format!(
+                "{variant}/{hint}:{class}",
+                variant = VariantType::OBJECT.ord(),
+                hint = export_hint.ord(),
+                class = T::class_name()
+            )
+        } else {
+            // Previous impl: format!("{variant}:", variant = VariantType::OBJECT.ord())
+            unreachable!("element_type_string() should only be invoked for exportable classes")
+        }
+    }
+}
+
+impl<T: GodotClass> ArrayElement for Option<Gd<T>> {
+    fn element_type_string() -> String {
+        Gd::<T>::element_type_string()
+    }
+}
 
 impl<T> Default for Gd<T>
 where
@@ -761,24 +792,6 @@ impl<T: GodotClass> Clone for Gd<T> {
     }
 }
 
-impl<T: GodotClass> TypeStringHint for Gd<T> {
-    fn type_string() -> String {
-        use crate::global::PropertyHint;
-
-        match Self::default_export_info().hint {
-            hint @ (PropertyHint::RESOURCE_TYPE | PropertyHint::NODE_TYPE) => {
-                format!(
-                    "{}/{}:{}",
-                    VariantType::OBJECT.ord(),
-                    hint.ord(),
-                    T::class_name()
-                )
-            }
-            _ => format!("{}:", VariantType::OBJECT.ord()),
-        }
-    }
-}
-
 // TODO: Do we even want to implement `Var` and `Export` for `Gd<T>`? You basically always want to use `Option<Gd<T>>` because the editor
 // may otherwise try to set the object to a null value.
 impl<T: GodotClass> Var for Gd<T> {
@@ -791,14 +804,17 @@ impl<T: GodotClass> Var for Gd<T> {
     }
 }
 
-impl<T: GodotClass> Export for Gd<T> {
-    fn default_export_info() -> PropertyHintInfo {
+impl<T> Export for Gd<T>
+where
+    T: GodotClass + Bounds<Exportable = bounds::Yes>,
+{
+    fn export_hint() -> PropertyHintInfo {
         let hint = if T::inherits::<classes::Resource>() {
             PropertyHint::RESOURCE_TYPE
         } else if T::inherits::<classes::Node>() {
             PropertyHint::NODE_TYPE
         } else {
-            PropertyHint::NONE
+            unreachable!("classes not inheriting from Resource or Node should not be exportable")
         };
 
         // Godot does this by default too; the hint is needed when the class is a resource/node,
@@ -806,6 +822,11 @@ impl<T: GodotClass> Export for Gd<T> {
         let hint_string = T::class_name().to_gstring();
 
         PropertyHintInfo { hint, hint_string }
+    }
+
+    #[doc(hidden)]
+    fn as_node_class() -> Option<ClassName> {
+        T::inherits::<classes::Node>().then(|| T::class_name())
     }
 }
 

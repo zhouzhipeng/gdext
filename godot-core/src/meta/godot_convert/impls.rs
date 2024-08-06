@@ -8,8 +8,8 @@
 use crate::builtin::Variant;
 use crate::meta::error::{ConvertError, FromFfiError, FromVariantError};
 use crate::meta::{
-    ArrayElement, ClassName, FromGodot, GodotConvert, GodotNullableFfi, GodotType, PropertyInfo,
-    ToGodot,
+    ArrayElement, ClassName, FromGodot, GodotConvert, GodotNullableFfi, GodotType,
+    PropertyHintInfo, PropertyInfo, ToGodot,
 };
 use crate::registry::method::MethodParamOrReturnInfo;
 use godot_ffi as sys;
@@ -62,6 +62,10 @@ where
 
     fn property_info(property_name: &str) -> PropertyInfo {
         T::property_info(property_name)
+    }
+
+    fn property_hint_info() -> PropertyHintInfo {
+        T::property_hint_info()
     }
 
     fn argument_info(property_name: &str) -> MethodParamOrReturnInfo {
