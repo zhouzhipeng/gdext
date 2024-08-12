@@ -6,9 +6,9 @@
  */
 
 use godot::builtin::Variant;
-use godot::classes::{ClassDb, Node};
+use godot::classes::{ClassDb, Node, ResourceFormatLoader, ResourceLoader};
 use godot::global;
-use godot::obj::{Gd, NewAlloc};
+use godot::obj::{Gd, NewAlloc, NewGd};
 
 use crate::framework::itest;
 use crate::object_tests::object_test::{user_refc_instance, RefcPayload};
@@ -34,6 +34,16 @@ fn object_arg_borrowed() {
 }
 
 #[itest]
+fn object_arg_borrowed_mut() {
+    with_objects(|mut manual, mut refc| {
+        let db = ClassDb::singleton();
+        let a = db.class_set_property(&mut manual, "name".into(), Variant::from("hello"));
+        let b = db.class_set_property(&mut refc, "value".into(), Variant::from(-123));
+        (a, b)
+    });
+}
+
+#[itest]
 fn object_arg_option_owned() {
     with_objects(|manual, refc| {
         let db = ClassDb::singleton();
@@ -49,6 +59,16 @@ fn object_arg_option_borrowed() {
         let db = ClassDb::singleton();
         let a = db.class_set_property(Some(&manual), "name".into(), Variant::from("hello"));
         let b = db.class_set_property(Some(&refc), "value".into(), Variant::from(-123));
+        (a, b)
+    });
+}
+
+#[itest]
+fn object_arg_option_borrowed_mut() {
+    with_objects(|mut manual, mut refc| {
+        let db = ClassDb::singleton();
+        let a = db.class_set_property(Some(&mut manual), "name".into(), Variant::from("hello"));
+        let b = db.class_set_property(Some(&mut refc), "value".into(), Variant::from(-123));
         (a, b)
     });
 }
@@ -76,6 +96,24 @@ fn object_arg_null_arg() {
 
     let error = db.class_set_property(Gd::null_arg(), "value".into(), Variant::from(-123));
     assert_eq!(error, global::Error::ERR_UNAVAILABLE);
+}
+
+// Regression test for https://github.com/godot-rust/gdext/issues/835.
+#[itest]
+fn object_arg_owned_default_params() {
+    // Calls the _ex() variant behind the scenes.
+    let a = ResourceFormatLoader::new_gd();
+    let b = ResourceFormatLoader::new_gd();
+
+    // Use direct and explicit _ex() call syntax.
+    ResourceLoader::singleton().add_resource_format_loader(a.clone()); // by value
+    ResourceLoader::singleton()
+        .add_resource_format_loader_ex(b.clone()) // by value
+        .done();
+
+    // Clean up (no leaks).
+    ResourceLoader::singleton().remove_resource_format_loader(a);
+    ResourceLoader::singleton().remove_resource_format_loader(b);
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------

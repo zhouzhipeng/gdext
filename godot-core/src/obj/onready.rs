@@ -88,7 +88,7 @@ use std::mem;
 ///    base: Base<Node>,
 ///    #[init(node = "ChildPath")]
 ///    auto: OnReady<Gd<Node2D>>,
-///    #[init(default = OnReady::manual())]
+///    #[init(val = OnReady::manual())]
 ///    manual: OnReady<i32>,
 /// }
 ///
