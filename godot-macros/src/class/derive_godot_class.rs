@@ -456,6 +456,32 @@ fn parse_fields(
                     OnReady::node(#node_path)
                 });
             }
+            // #[init(id = "some_id")]
+            if let Some(node_path) = parser.handle_expr("id")? {
+                if !field.is_onready {
+                    return bail!(
+                        parser.span(),
+                        "The key `node` in attribute #[init] requires field of type `OnReady<T>`\n\
+				         Help: The syntax #[init(id = \"some_id\")] is equivalent to \
+				         #[init(default = OnReady::id(\"some_id\"))], \
+				         which can only be assigned to fields of type `OnReady<T>`"
+                    );
+                }
+
+                if field.default.is_some() {
+                    return bail!(
+				        parser.span(),
+				           "The key `node` in attribute #[init] requires field of type `OnReady<T>`\n\
+				         Help: The syntax #[init(id = \"some_id\")] is equivalent to \
+				         #[init(default = OnReady::id(\"some_id\"))], \
+				         which can only be assigned to fields of type `OnReady<T>`"
+			        );
+                }
+
+                field.default = Some(quote! {
+                    OnReady::id(#node_path)
+                });
+            }
 
             parser.finish()?;
         }

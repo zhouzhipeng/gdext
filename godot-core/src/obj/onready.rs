@@ -7,6 +7,7 @@
 
 use crate::builtin::NodePath;
 use crate::classes::Node;
+use crate::classes::Object;
 use crate::meta::GodotConvert;
 use crate::obj::{Gd, GodotClass, Inherits};
 use crate::registry::property::Var;
@@ -107,7 +108,7 @@ pub struct OnReady<T> {
     state: InitState<T>,
 }
 
-impl<T: GodotClass + Inherits<Node>> OnReady<Gd<T>> {
+impl<T: GodotClass + Inherits<Node>  + Inherits<Object>> OnReady<Gd<T>> {
     /// Variant of [`OnReady::new()`], fetching the node located at `path` before `ready()`.
     ///
     /// This is the functional equivalent of the GDScript pattern `@onready var node = $NodePath`.
@@ -121,6 +122,20 @@ impl<T: GodotClass + Inherits<Node>> OnReady<Gd<T>> {
         let path = path.into();
         Self::from_base_fn(|base| base.get_node_as(path))
     }
+    pub fn id(id: &str) -> Self {
+        let id = id.to_string();
+        Self::from_base_fn(move |base| {
+            let meta = base.get_meta(format!("ID_{}",id).into());
+            if meta.is_nil(){
+                panic!("ID meta not found!")
+            }else{
+                let inst_id: i64 = meta.to();
+                let obj = crate::gen::utilities::instance_from_id(inst_id).unwrap();
+                obj.cast()
+            }
+        })
+    }
+
 }
 
 impl<T> OnReady<T> {
@@ -151,6 +166,8 @@ impl<T> OnReady<T> {
             },
         }
     }
+
+
 
     /// Leave uninitialized, expects manual initialization during `ready()`.
     ///
