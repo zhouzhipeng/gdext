@@ -485,7 +485,7 @@ fn parse_fields(
                     );
                 }
 
-                if field.default.is_some() {
+                if field.default_val.is_some() {
                     return bail!(
 				        parser.span(),
 				           "The key `node` in attribute #[init] requires field of type `OnReady<T>`\n\
@@ -495,7 +495,7 @@ fn parse_fields(
 			        );
                 }
 
-                field.default = Some(quote! {
+                field.default_val = Some(quote! {
                     OnReady::id(#node_path)
                 });
             }
