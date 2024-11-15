@@ -5,11 +5,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::cell::Cell;
-
-use godot::builtin::{Callable, GString, Signal, StringName, Variant};
+use godot::builtin::{Callable, GString, Signal, StringName};
 use godot::meta::ToGodot;
 use godot::register::{godot_api, GodotClass};
+use std::cell::Cell;
 
 use godot::classes::{Object, RefCounted};
 use godot::obj::{Base, Gd, NewAlloc, NewGd, WithBaseField};
@@ -72,19 +71,16 @@ fn signals() {
 
     let args = [
         vec![],
-        vec![Variant::from(987)],
-        vec![
-            Variant::from(receiver.clone()),
-            Variant::from(SIGNAL_ARG_STRING),
-        ],
+        vec![987.to_variant()],
+        vec![receiver.to_variant(), SIGNAL_ARG_STRING.to_variant()],
     ];
 
     for (i, arg) in args.iter().enumerate() {
         let signal_name = format!("signal_{i}_arg");
         let receiver_name = format!("receive_{i}_arg");
 
-        emitter.connect(signal_name.clone().into(), receiver.callable(receiver_name));
-        emitter.emit_signal(signal_name.into(), arg);
+        emitter.connect(&signal_name, &receiver.callable(&receiver_name));
+        emitter.emit_signal(&signal_name, arg);
 
         assert!(receiver.bind().used[i].get());
     }
@@ -97,7 +93,7 @@ fn signals() {
 fn instantiate_signal() {
     let mut object = RefCounted::new_gd();
 
-    object.add_user_signal("test_signal".into());
+    object.add_user_signal("test_signal");
 
     let signal = Signal::from_object_signal(&object, "test_signal");
 
@@ -111,20 +107,18 @@ fn instantiate_signal() {
 fn emit_signal() {
     let mut object = RefCounted::new_gd();
 
-    object.add_user_signal("test_signal".into());
+    object.add_user_signal("test_signal");
 
     let signal = Signal::from_object_signal(&object, "test_signal");
     let receiver = Receiver::new_alloc();
 
     object.connect(
-        StringName::from("test_signal"),
-        Callable::from_object_method(&receiver, "receive_1_arg"),
+        &StringName::from("test_signal"), // explicit StringName
+        &Callable::from_object_method(&receiver, "receive_1_arg"),
     );
-
     assert_eq!(signal.connections().len(), 1);
 
     signal.emit(&[987i64.to_variant()]);
-
     assert!(receiver.bind().used[1].get());
 
     receiver.free();
@@ -134,18 +128,168 @@ fn emit_signal() {
 fn connect_signal() {
     let mut object = RefCounted::new_gd();
 
-    object.add_user_signal("test_signal".into());
+    object.add_user_signal("test_signal");
 
     let signal = Signal::from_object_signal(&object, "test_signal");
     let receiver = Receiver::new_alloc();
 
-    signal.connect(Callable::from_object_method(&receiver, "receive_1_arg"), 0);
-
+    signal.connect(&Callable::from_object_method(&receiver, "receive_1_arg"), 0);
     assert_eq!(signal.connections().len(), 1);
 
-    object.emit_signal(StringName::from("test_signal"), &[987i64.to_variant()]);
-
+    object.emit_signal("test_signal", &[987i64.to_variant()]);
     assert!(receiver.bind().used[1].get());
 
     receiver.free();
+}
+
+#[cfg(since_api = "4.2")]
+mod custom_callable {
+    use godot::builtin::{Callable, Signal};
+    use godot::meta::ToGodot;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use godot::classes::Node;
+    use godot::obj::{Gd, NewAlloc};
+
+    use crate::builtin_tests::containers::callable_test::custom_callable::PanicCallable;
+    use crate::framework::{itest, TestContext};
+
+    #[itest]
+    fn connect_signal_panic_user_from_fn() {
+        connect_signal_panic_shared(
+            "test_signal",
+            connect_signal_panic_from_fn,
+            |node| {
+                node.add_user_signal("test_signal");
+            },
+            |node| {
+                node.emit_signal("test_signal", &[987i64.to_variant()]);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_user_from_custom() {
+        connect_signal_panic_shared(
+            "test_signal",
+            connect_signal_panic_from_custom,
+            |node| {
+                node.add_user_signal("test_signal");
+            },
+            |node| {
+                node.emit_signal("test_signal", &[987i64.to_variant()]);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_from_fn_tree_entered(ctx: &TestContext) {
+        connect_signal_panic_shared(
+            "tree_entered",
+            connect_signal_panic_from_fn,
+            |_node| {},
+            |node| {
+                ctx.scene_tree.clone().add_child(&*node);
+                ctx.scene_tree.clone().remove_child(&*node);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_from_custom_tree_entered(ctx: &TestContext) {
+        connect_signal_panic_shared(
+            "tree_entered",
+            connect_signal_panic_from_custom,
+            |_node| {},
+            |node| {
+                ctx.scene_tree.clone().add_child(&*node);
+                ctx.scene_tree.clone().remove_child(&*node);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_from_fn_tree_exiting(ctx: &TestContext) {
+        connect_signal_panic_shared(
+            "tree_exiting",
+            connect_signal_panic_from_fn,
+            |_node| {},
+            |node| {
+                ctx.scene_tree.clone().add_child(&*node);
+                ctx.scene_tree.clone().remove_child(&*node);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_from_custom_tree_exiting(ctx: &TestContext) {
+        connect_signal_panic_shared(
+            "tree_exiting",
+            connect_signal_panic_from_custom,
+            |_node| {},
+            |node| {
+                ctx.scene_tree.clone().add_child(&*node);
+                ctx.scene_tree.clone().remove_child(&*node);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_from_fn_tree_exited(ctx: &TestContext) {
+        connect_signal_panic_shared(
+            "tree_exited",
+            connect_signal_panic_from_fn,
+            |_node| {},
+            |node| {
+                ctx.scene_tree.clone().add_child(&*node);
+                ctx.scene_tree.clone().remove_child(&*node);
+            },
+        );
+    }
+
+    #[itest]
+    fn connect_signal_panic_from_custom_tree_exited(ctx: &TestContext) {
+        connect_signal_panic_shared(
+            "tree_exited",
+            connect_signal_panic_from_custom,
+            |_node| {},
+            |node| {
+                ctx.scene_tree.clone().add_child(&*node);
+                ctx.scene_tree.clone().remove_child(&*node);
+            },
+        );
+    }
+
+    fn connect_signal_panic_shared(
+        signal: &str,
+        callable: impl FnOnce(Arc<AtomicU32>) -> Callable,
+        before: impl FnOnce(&mut Gd<Node>),
+        emit: impl FnOnce(&mut Gd<Node>),
+    ) {
+        let mut node = Node::new_alloc();
+        before(&mut node);
+
+        let signal = Signal::from_object_signal(&node, signal);
+
+        let received = Arc::new(AtomicU32::new(0));
+        let callable = callable(received.clone());
+        signal.connect(&callable, 0);
+
+        emit(&mut node);
+
+        assert_eq!(1, received.load(Ordering::SeqCst));
+
+        node.free();
+    }
+
+    fn connect_signal_panic_from_fn(received: Arc<AtomicU32>) -> Callable {
+        Callable::from_fn("test", move |_args| {
+            panic!("TEST: {}", received.fetch_add(1, Ordering::SeqCst))
+        })
+    }
+
+    fn connect_signal_panic_from_custom(received: Arc<AtomicU32>) -> Callable {
+        Callable::from_custom(PanicCallable(received))
+    }
 }

@@ -56,11 +56,11 @@ fn func_virtual() {
     assert_eq!(object.bind().greet_lang(72), GString::from("Rust#72"));
 
     // With script: "GDScript".
-    object.set_script(make_script().to_variant());
+    object.set_script(&make_script().to_variant());
     assert_eq!(object.bind().greet_lang(72), GString::from("GDScript#72"));
 
     // Dynamic call: "GDScript".
-    let result = object.call("_greet_lang".into(), &[72.to_variant()]);
+    let result = object.call("_greet_lang", &[72.to_variant()]);
     assert_eq!(result, "GDScript#72".to_variant());
 }
 
@@ -74,14 +74,14 @@ fn func_virtual_renamed() {
     );
 
     // With script: "GDScript".
-    object.set_script(make_script().to_variant());
+    object.set_script(&make_script().to_variant());
     assert_eq!(
         object.bind().gl2("Hello".into()),
         GString::from("Hello GDScript")
     );
 
     // Dynamic call: "GDScript".
-    let result = object.call("greet_lang2".into(), &["Hello".to_variant()]);
+    let result = object.call("greet_lang2", &["Hello".to_variant()]);
     assert_eq!(result, "Hello GDScript".to_variant());
 }
 
@@ -95,21 +95,21 @@ fn func_virtual_gd_self() {
     );
 
     // With script: "GDScript".
-    object.set_script(make_script().to_variant());
+    object.set_script(&make_script().to_variant());
     assert_eq!(
         VirtualScriptCalls::greet_lang3(object.clone(), "Hoi".into()),
         GString::from("Hoi GDScript")
     );
 
     // Dynamic call: "GDScript".
-    let result = object.call("_greet_lang3".into(), &["Hoi".to_variant()]);
+    let result = object.call("_greet_lang3", &["Hoi".to_variant()]);
     assert_eq!(result, "Hoi GDScript".to_variant());
 }
 
 #[itest]
 fn func_virtual_stateful() {
     let mut object = VirtualScriptCalls::new_gd();
-    object.set_script(make_script().to_variant());
+    object.set_script(&make_script().to_variant());
 
     let variant = Vector3i::new(1, 2, 2).to_variant();
     object.bind_mut().set_thing(variant.clone());
@@ -141,7 +141,7 @@ func _get_thing():
 "#;
 
     let mut script = GDScript::new_gd();
-    script.set_source_code(code.into());
+    script.set_source_code(code);
     script.reload(); // Necessary so compile is triggered.
 
     let methods = script

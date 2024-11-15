@@ -96,13 +96,18 @@ impl ClassNameSource {
 /// This struct is very cheap to copy. The actual names are cached globally.
 ///
 /// If you need to create your own class name, use [`new_cached()`][Self::new_cached].
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+///
+/// # Ordering
+///
+/// `ClassName`s are **not** ordered lexicographically, and the ordering relation is **not** stable across multiple runs of your
+/// application. When lexicographical order is needed, it's possible to convert this type to [`GString`] or [`String`].
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct ClassName {
     global_index: u16,
 }
 
 impl ClassName {
-    /// Construct a new ASCII class name.
+    /// Construct a new class name.
     ///
     /// This is expensive the first time it called for a given `T`, but will be cached for subsequent calls.
     ///
@@ -110,7 +115,7 @@ impl ClassName {
     /// to keep the invocations limited, so you can use more expensive construction in the closure.
     ///
     /// # Panics
-    /// If the string is not ASCII.
+    /// If the string is not ASCII and the Godot version is older than 4.4. From Godot 4.4 onwards, class names can be Unicode.
     pub fn new_cached<T: GodotClass>(init_fn: impl FnOnce() -> String) -> Self {
         // Check if class name exists.
         let type_id = TypeId::of::<T>();
@@ -119,7 +124,12 @@ impl ClassName {
         // Insert into linear vector. Note: this doesn't check for overlaps of TypeId between static and dynamic class names.
         let global_index = *map.entry(type_id).or_insert_with(|| {
             let name = init_fn();
-            debug_assert!(name.is_ascii(), "Class name must be ASCII: '{name}'");
+
+            #[cfg(before_api = "4.4")]
+            assert!(
+                name.is_ascii(),
+                "In Godot < 4.4, class name must be ASCII: '{name}'"
+            );
 
             insert_class(ClassNameSource::Owned(name))
         });
@@ -134,8 +144,37 @@ impl ClassName {
     }
 
     #[doc(hidden)]
-    pub fn alloc_next(class_name_cstr: &'static CStr) -> Self {
+    pub fn alloc_next_ascii(class_name_cstr: &'static CStr) -> Self {
+        let utf8 = class_name_cstr
+            .to_str()
+            .expect("class name is invalid UTF-8");
+
+        assert!(
+            utf8.is_ascii(),
+            "ClassName::alloc_next_ascii() with non-ASCII Unicode string '{}'",
+            utf8
+        );
+
         let global_index = insert_class(ClassNameSource::Borrowed(class_name_cstr));
+
+        Self { global_index }
+    }
+
+    #[doc(hidden)]
+    pub fn alloc_next_unicode(class_name_str: &'static str) -> Self {
+        assert!(
+            cfg!(since_api = "4.4"),
+            "Before Godot 4.4, class names must be ASCII, but '{class_name_str}' is not.\nSee https://github.com/godotengine/godot/pull/96501."
+        );
+
+        assert!(
+            !class_name_str.is_ascii(),
+            "ClassName::alloc_next_unicode() with ASCII string '{}'",
+            class_name_str
+        );
+
+        // StringNames use optimized 1-byte-per-char layout for Latin-1/ASCII, so Unicode can as well use the regular constructor.
+        let global_index = insert_class(ClassNameSource::Owned(class_name_str.to_owned()));
 
         Self { global_index }
     }

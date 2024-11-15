@@ -5,12 +5,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::builtin::NodePath;
+use crate::builtin::{NodePath, StringName};
 use crate::classes::Node;
+use crate::meta::{arg_into_owned, AsArg, GodotConvert};
 use crate::classes::Object;
-use crate::meta::GodotConvert;
 use crate::obj::{Gd, GodotClass, Inherits};
 use crate::registry::property::Var;
+use std::fmt::{self, Debug, Formatter};
 use std::mem;
 
 /// Ergonomic late-initialization container with `ready()` support.
@@ -104,6 +105,7 @@ use std::mem;
 ///     }
 /// }
 /// ```
+#[derive(Debug)]
 pub struct OnReady<T> {
     state: InitState<T>,
 }
@@ -118,14 +120,15 @@ impl<T: GodotClass + Inherits<Node>  + Inherits<Object>> OnReady<Gd<T>> {
     ///
     /// Note that the panic will only happen if and when the node enters the SceneTree for the first time
     ///  (i.e.: it receives the `READY` notification).
-    pub fn node(path: impl Into<NodePath>) -> Self {
-        let path = path.into();
-        Self::from_base_fn(|base| base.get_node_as(path))
+    pub fn node(path: impl AsArg<NodePath>) -> Self {
+        arg_into_owned!(path);
+
+        Self::from_base_fn(move |base| base.get_node_as(&path))
     }
     pub fn id(id: &str) -> Self {
         let id = id.to_string();
         Self::from_base_fn(move |base| {
-            let meta = base.get_meta(format!("ID_{}",id).into());
+            let meta = base.get_meta(&format!("ID_{}",id));
             if meta.is_nil(){
                 panic!("ID meta not found!")
             }else{
@@ -296,4 +299,20 @@ enum InitState<T> {
     AutoPrepared { initializer: Box<InitFn<T>> },
     AutoInitializing, // needed because state cannot be empty
     Initialized { value: T },
+}
+
+impl<T: Debug> Debug for InitState<T> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            InitState::ManualUninitialized => fmt.debug_struct("ManualUninitialized").finish(),
+            InitState::AutoPrepared { .. } => {
+                fmt.debug_struct("AutoPrepared").finish_non_exhaustive()
+            }
+            InitState::AutoInitializing => fmt.debug_struct("AutoInitializing").finish(),
+            InitState::Initialized { value } => fmt
+                .debug_struct("Initialized")
+                .field("value", value)
+                .finish(),
+        }
+    }
 }

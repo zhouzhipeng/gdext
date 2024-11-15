@@ -13,7 +13,7 @@ use crate::meta::ClassName;
 use crate::obj::{cap, GodotClass};
 use crate::private::{ClassPlugin, PluginItem};
 use crate::registry::callbacks;
-use crate::registry::plugin::ErasedRegisterFn;
+use crate::registry::plugin::{ErasedRegisterFn, InherentImpl};
 use crate::{godot_error, sys};
 use sys::{interface_fn, out, Global, GlobalGuard, GlobalLockError};
 
@@ -71,7 +71,7 @@ impl ClassRegistrationInfo {
         // Note: when changing this match, make sure the array has sufficient size.
         let index = match item {
             PluginItem::Struct { .. } => 0,
-            PluginItem::InherentImpl { .. } => 1,
+            PluginItem::InherentImpl(_) => 1,
             PluginItem::ITraitImpl { .. } => 2,
         };
 
@@ -200,6 +200,18 @@ pub fn unregister_classes(init_level: InitLevel) {
     }
 }
 
+#[cfg(feature = "codegen-full")]
+pub fn auto_register_rpcs<T: GodotClass>(object: &mut T) {
+    // Find the element that matches our class, and call the closure if it exists.
+    if let Some(InherentImpl {
+        register_rpcs_fn: Some(closure),
+        ..
+    }) = crate::private::find_inherent_impl(T::class_name())
+    {
+        (closure.raw)(object);
+    }
+}
+
 fn global_loaded_classes() -> GlobalGuard<'static, HashMap<InitLevel, Vec<LoadedClass>>> {
     match LOADED_CLASSES.try_lock() {
         Ok(it) => it,
@@ -229,9 +241,9 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             default_get_virtual_fn,
             is_tool,
             is_editor_plugin,
-            is_hidden,
+            is_internal,
             is_instantiable,
-            #[cfg(all(since_api = "4.3", feature = "docs"))]
+            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
                 docs: _,
         } => {
             c.parent_class_name = Some(base_class_name);
@@ -257,7 +269,7 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             .expect("duplicate: create_instance_func (def)");
 
             #[cfg(before_api = "4.2")]
-            let _ = is_hidden; // mark used
+            let _ = is_internal; // mark used
             #[cfg(since_api = "4.2")]
             {
                 fill_into(
@@ -266,7 +278,7 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
                 )
                 .expect("duplicate: recreate_instance_func (def)");
 
-                c.godot_params.is_exposed = sys::conv::bool_to_sys(!is_hidden);
+                c.godot_params.is_exposed = sys::conv::bool_to_sys(!is_internal);
             }
 
             #[cfg(before_api = "4.2")]
@@ -281,11 +293,12 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             }
         }
 
-        PluginItem::InherentImpl {
+        PluginItem::InherentImpl(InherentImpl {
             register_methods_constants_fn,
-            #[cfg(all(since_api = "4.3", feature = "docs"))]
+            register_rpcs_fn: _,
+            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
                 docs: _,
-        } => {
+        }) => {
             c.register_methods_constants_fn = Some(register_methods_constants_fn);
         }
 
@@ -302,7 +315,7 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             user_free_property_list_fn,
             user_property_can_revert_fn,
             user_property_get_revert_fn,
-            #[cfg(all(since_api = "4.3", feature = "docs"))]
+            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
                 virtual_method_docs: _,
         } => {
             c.user_register_fn = user_register_fn;
@@ -399,7 +412,7 @@ fn register_class_raw(mut info: ClassRegistrationInfo) {
     // This can happen during hot reload if a class changes base type in an incompatible way (e.g. RefCounted -> Node).
     if registration_failed {
         godot_error!(
-            "Failed to register class `{class_name}`; check preceding Godot stderr messages"
+            "Failed to register class `{class_name}`; check preceding Godot stderr messages."
         );
     }
 

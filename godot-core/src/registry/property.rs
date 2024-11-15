@@ -60,10 +60,52 @@ pub trait Export: Var {
     ///
     /// Only overridden for `Gd<T>`, to detect erroneous exports of `Node` inside a `Resource` class.
     #[allow(clippy::wrong_self_convention)]
+    #[doc(hidden)]
     fn as_node_class() -> Option<ClassName> {
         None
     }
 }
+
+/// This function only exists as a place to add doc-tests for the `Export` trait.
+///
+/// Test with export of exportable type should succeed:
+/// ```no_run
+/// use godot::prelude::*;
+///
+/// #[derive(GodotClass)]
+/// #[class(init)]
+/// struct Foo {
+///     #[export]
+///     obj: Option<Gd<Resource>>,
+///     #[export]
+///     array: Array<Gd<Resource>>,
+/// }
+/// ```
+///
+/// Tests with export of non-exportable type should fail:
+/// ```compile_fail
+/// use godot::prelude::*;
+///
+/// #[derive(GodotClass)]
+/// #[class(init)]
+/// struct Foo {
+///     #[export]
+///     obj: Option<Gd<Object>>,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use godot::prelude::*;
+///
+/// #[derive(GodotClass)]
+/// #[class(init)]
+/// struct Foo {
+///     #[export]
+///     array: Array<Gd<Object>>,
+/// }
+/// ```
+#[allow(dead_code)]
+fn export_doctests() {}
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Blanket impls for Option<T>
@@ -165,11 +207,15 @@ pub mod export_info_functions {
         hide_slider: bool,
         suffix: Option<String>,
     ) -> PropertyHintInfo {
+        // From Godot 4.4, GDScript uses `.0` for integral floats, see https://github.com/godotengine/godot/pull/47502.
+        // We still register them the old way, to test compatibility. See also property_template_test.rs.
+
         let hint_beginning = if let Some(step) = step {
             format!("{min},{max},{step}")
         } else {
             format!("{min},{max}")
         };
+
         let rest = comma_separate_boolean_idents!(
             or_greater,
             or_less,

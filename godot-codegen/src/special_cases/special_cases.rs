@@ -28,6 +28,7 @@ use crate::models::domain::{Enum, RustTy, TyName};
 use crate::models::json::{JsonBuiltinMethod, JsonClassMethod, JsonUtilityFunction};
 use crate::special_cases::codegen_special_cases;
 use crate::Context;
+use proc_macro2::Ident;
 // Deliberately private -- all checks must go through `special_cases`.
 
 #[rustfmt::skip]
@@ -88,12 +89,12 @@ pub fn is_godot_type_deleted(godot_ty: &str) -> bool {
 
     // OpenXR has not been available for macOS before 4.2.
     // See e.g. https://github.com/GodotVR/godot-xr-tools/issues/479.
-    // OpenXR is also not available on iOS: https://github.com/godotengine/godot/blob/13ba673c42951fd7cfa6fd8a7f25ede7e9ad92bb/modules/openxr/config.py#L2
+    // OpenXR is also not available on iOS and Web: https://github.com/godotengine/godot/blob/13ba673c42951fd7cfa6fd8a7f25ede7e9ad92bb/modules/openxr/config.py#L2
     // Do not hardcode a list of OpenXR classes, as more may be added in future Godot versions; instead use prefix.
     if godot_ty.starts_with("OpenXR") {
         let target_os = std::env::var("CARGO_CFG_TARGET_OS");
         match target_os.as_deref() {
-            Ok("ios") => return true,
+            Ok("ios") | Ok("emscripten") => return true,
             Ok("macos") => {
                 #[cfg(before_api = "4.2")]
                 return true;
@@ -145,16 +146,24 @@ pub fn is_class_experimental(godot_class_name: &str) -> bool {
     // Note: parameter can be a class or builtin name, but also something like "enum::AESContext.Mode".
 
     // These classes are currently hardcoded, but the information is available in Godot's doc/classes directory.
-    // The XML file contains a property <class name="NavigationMesh" ... is_experimental="true">.
+    // The XML file contains a property <class name="NavigationMesh" ... experimental="">.
 
+    // Last update: 2024-09-15; Godot rev 6681f2563b99e14929a8acb27f4908fece398ef1.
     match godot_class_name {
+        | "AudioSample"
+        | "AudioSamplePlayback"
+        | "Compositor"
+        | "CompositorEffect"
         | "GraphEdit"
+        | "GraphElement"
+        | "GraphFrame"
         | "GraphNode"
         | "NavigationAgent2D"
         | "NavigationAgent3D"
         | "NavigationLink2D"
         | "NavigationLink3D"
         | "NavigationMesh"
+        | "NavigationMeshSourceGeometryData2D"
         | "NavigationMeshSourceGeometryData3D"
         | "NavigationObstacle2D"
         | "NavigationObstacle3D"
@@ -167,6 +176,7 @@ pub fn is_class_experimental(godot_class_name: &str) -> bool {
         | "NavigationRegion3D"
         | "NavigationServer2D"
         | "NavigationServer3D"
+        | "Parallax2D"
         | "SkeletonModification2D"
         | "SkeletonModification2DCCDIK"
         | "SkeletonModification2DFABRIK"
@@ -177,8 +187,11 @@ pub fn is_class_experimental(godot_class_name: &str) -> bool {
         | "SkeletonModification2DTwoBoneIK"
         | "SkeletonModificationStack2D"
         | "StreamPeerGZIP"
-        | "TextureRect"
-        
+        | "XRBodyModifier3D"
+        | "XRBodyTracker"
+        | "XRFaceModifier3D"
+        | "XRFaceTracker"
+
         => true, _ => false
     }
 }
@@ -269,6 +282,44 @@ pub fn is_class_method_const(class_name: &TyName, godot_method: &JsonClassMethod
     }
 }
 
+/// Currently only for virtual methods; checks if the specified parameter is required (non-null) and can be declared as `Gd<T>`
+/// instead of `Option<Gd<T>>`.
+pub fn is_class_method_param_required(
+    class_name: &TyName,
+    method_name: &str,
+    param: &Ident, // Don't use `&str` to avoid to_string() allocations for each check on call-site.
+) -> bool {
+    // Note: magically, it's enough if a base class method is declared here; it will be picked up by derived classes.
+
+    match (class_name.godot_ty.as_str(), method_name) {
+        // Nodes.
+        ("Node", "input") => true,
+        ("Node", "shortcut_input") => true,
+        ("Node", "unhandled_input") => true,
+        ("Node", "unhandled_key_input") => true,
+
+        // https://docs.godotengine.org/en/stable/classes/class_collisionobject2d.html#class-collisionobject2d-private-method-input-event
+        ("CollisionObject2D", "input_event") => true, // both parameters.
+
+        // UI.
+        ("Control", "gui_input") => true,
+
+        // Script instances.
+        ("ScriptExtension", "instance_create") => param == "for_object",
+        ("ScriptExtension", "placeholder_instance_create") => param == "for_object",
+        ("ScriptExtension", "inherits_script") => param == "script",
+        ("ScriptExtension", "instance_has") => param == "object",
+
+        // Editor.
+        ("EditorExportPlugin", "customize_resource") => param == "resource",
+        ("EditorExportPlugin", "customize_scene") => param == "scene",
+
+        ("EditorPlugin", "handles") => param == "object",
+
+        _ => false,
+    }
+}
+
 /// True if builtin method is excluded. Does NOT check for type exclusion; use [`is_builtin_type_deleted`] for that.
 pub fn is_builtin_method_deleted(_class_name: &TyName, method: &JsonBuiltinMethod) -> bool {
     // Currently only deleted if codegen.
@@ -315,6 +366,9 @@ pub fn maybe_rename_virtual_method(rust_method_name: &str) -> &str {
     }
 }
 
+// TODO method-level extra docs, for:
+// - Node::rpc_config() -> link to RpcConfig.
+
 pub fn get_class_extra_docs(class_name: &TyName) -> Option<&'static str> {
     match class_name.godot_ty.as_str() {
         "FileAccess" => {
@@ -338,6 +392,7 @@ pub fn get_interface_extra_docs(trait_name: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(before_api = "4.4")]
 pub fn is_virtual_method_required(class_name: &str, method: &str) -> bool {
     match (class_name, method) {
         ("ScriptLanguageExtension", _) => method != "get_doc_comment_delimiters",

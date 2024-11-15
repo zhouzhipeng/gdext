@@ -7,7 +7,7 @@
 
 use godot_ffi as sys;
 
-use crate::builtin::{Array, StringName, Variant};
+use crate::builtin::Variant;
 use crate::global::PropertyUsageFlags;
 use crate::meta::error::ConvertError;
 use crate::meta::{
@@ -17,6 +17,7 @@ use crate::registry::method::MethodParamOrReturnInfo;
 
 // Re-export sys traits in this module, so all are in one place.
 use crate::registry::property::builtin_type_string;
+use crate::{builtin, meta};
 pub use sys::{GodotFfi, GodotNullableFfi};
 
 /// Conversion of [`GodotFfi`] types to/from [`Variant`].
@@ -38,25 +39,41 @@ pub trait GodotFfiVariant: Sized + GodotFfi {
 // type. For instance [`i32`] does not implement `GodotFfi` because it cannot represent all values of
 // Godot's `int` type, however it does implement `GodotType` because we can set the metadata of values with
 // this type to indicate that they are 32 bits large.
-pub trait GodotType:
-    GodotConvert<Via = Self> + ToGodot + FromGodot + sealed::Sealed + 'static
+pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
 // 'static is not technically required, but it simplifies a few things (limits e.g. ObjectArg).
 {
+    // Value type for this type's FFI representation.
     #[doc(hidden)]
-    type Ffi: GodotFfiVariant;
+    type Ffi: GodotFfiVariant + 'static;
 
+    // Value or reference type when passing this type *to* Godot FFI.
     #[doc(hidden)]
-    fn to_ffi(&self) -> Self::Ffi;
+    type ToFfi<'f>: GodotFfiVariant
+    where
+        Self: 'f;
 
+    /// Returns the FFI representation of this type, used for argument passing.
+    ///
+    /// Often returns a reference to the value, which can then be used to interact with Godot without cloning/inc-ref-ing the value.
+    /// For scalars and `Copy` types, this usually returns a copy of the value.
+    #[doc(hidden)]
+    fn to_ffi(&self) -> Self::ToFfi<'_>;
+
+    /// Consumes value and converts into FFI representation, used for return types.
+    ///
+    /// Unlike [`to_ffi()`][Self:to_ffi], this method consumes the value and is used for return types rather than argument passing.
+    /// Using `to_ffi()` for return types can be incorrect, since the associated types `Ffi` and `ToFfi<'f>` may differ and the latter
+    /// may not implement return type conversions such as [`GodotFfi::move_return_ptr()`].
     #[doc(hidden)]
     fn into_ffi(self) -> Self::Ffi;
 
+    /// Converts from FFI representation to Rust type.
     #[doc(hidden)]
     fn try_from_ffi(ffi: Self::Ffi) -> Result<Self, ConvertError>;
 
     #[doc(hidden)]
     fn from_ffi(ffi: Self::Ffi) -> Self {
-        Self::try_from_ffi(ffi).unwrap()
+        Self::try_from_ffi(ffi).expect("Failed conversion from FFI representation to Rust type")
     }
 
     #[doc(hidden)]
@@ -75,7 +92,7 @@ pub trait GodotType:
         PropertyInfo {
             variant_type: Self::Ffi::variant_type(),
             class_name: Self::class_name(),
-            property_name: StringName::from(property_name),
+            property_name: builtin::StringName::from(property_name),
             hint_info: Self::property_hint_info(),
             usage: PropertyUsageFlags::DEFAULT,
         }
@@ -145,7 +162,7 @@ pub trait GodotType:
     message = "`Array<T>` can only store element types supported in Godot arrays (no nesting).",
     label = "has invalid element type"
 )]
-pub trait ArrayElement: GodotType + sealed::Sealed {
+pub trait ArrayElement: GodotType + ToGodot + FromGodot + sealed::Sealed + meta::ParamType {
     /// Returns the representation of this type as a type string.
     ///
     /// Used for elements in arrays (the latter despite `ArrayElement` not having a direct relation).
@@ -158,7 +175,8 @@ pub trait ArrayElement: GodotType + sealed::Sealed {
         builtin_type_string::<Self>()
     }
 
-    fn debug_validate_elements(_array: &Array<Self>) -> Result<(), ConvertError> {
+    #[doc(hidden)]
+    fn debug_validate_elements(_array: &builtin::Array<Self>) -> Result<(), ConvertError> {
         // No-op for most element types.
         Ok(())
     }
@@ -183,9 +201,9 @@ impl PackedArrayElement for i32 {}
 impl PackedArrayElement for i64 {}
 impl PackedArrayElement for f32 {}
 impl PackedArrayElement for f64 {}
-impl PackedArrayElement for crate::builtin::Vector2 {}
-impl PackedArrayElement for crate::builtin::Vector3 {}
+impl PackedArrayElement for builtin::Vector2 {}
+impl PackedArrayElement for builtin::Vector3 {}
 #[cfg(since_api = "4.3")]
-impl PackedArrayElement for crate::builtin::Vector4 {}
-impl PackedArrayElement for crate::builtin::Color {}
-impl PackedArrayElement for crate::builtin::GString {}
+impl PackedArrayElement for builtin::Vector4 {}
+impl PackedArrayElement for builtin::Color {}
+impl PackedArrayElement for builtin::GString {}

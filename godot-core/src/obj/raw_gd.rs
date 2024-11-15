@@ -13,13 +13,13 @@ use sys::{interface_fn, GodotFfi, GodotNullableFfi, PtrcallType};
 use crate::builtin::Variant;
 use crate::meta::error::{ConvertError, FromVariantError};
 use crate::meta::{
-    CallContext, ClassName, FromGodot, GodotConvert, GodotFfiVariant, GodotType, ToGodot,
+    CallContext, ClassName, FromGodot, GodotConvert, GodotFfiVariant, GodotType, RefArg, ToGodot,
 };
 use crate::obj::bounds::{Declarer, DynMemory as _};
 use crate::obj::rtti::ObjectRtti;
 use crate::obj::{bounds, Bounds, GdDerefTarget, GdMut, GdRef, GodotClass, InstanceId};
 use crate::storage::{InstanceCache, InstanceStorage, Storage};
-use crate::{classes, global, out};
+use crate::{classes, out};
 
 /// Low-level bindings for object pointers in Godot.
 ///
@@ -39,15 +39,6 @@ pub struct RawGd<T: GodotClass> {
 }
 
 impl<T: GodotClass> RawGd<T> {
-    /// Create a new object representing a null in Godot.
-    pub(super) fn null() -> Self {
-        Self {
-            obj: ptr::null_mut(),
-            cached_rtti: None,
-            cached_storage_ptr: InstanceCache::null(),
-        }
-    }
-
     /// Initializes this `RawGd<T>` from the object pointer as a **weak ref**, meaning it does not
     /// initialize/increment the reference counter.
     ///
@@ -112,7 +103,7 @@ impl<T: GodotClass> RawGd<T> {
     pub(crate) fn is_instance_valid(&self) -> bool {
         self.cached_rtti
             .as_ref()
-            .map(|rtti| global::is_instance_id_valid(rtti.instance_id().to_i64()))
+            .map(|rtti| rtti.instance_id().lookup_validity())
             .unwrap_or(false)
     }
 
@@ -132,7 +123,7 @@ impl<T: GodotClass> RawGd<T> {
 
         // SAFETY: Object is always a base class.
         let cast_is_valid = unsafe { as_obj.as_upcast_ref::<classes::Object>() }
-            .is_class(U::class_name().to_gstring());
+            .is_class(&U::class_name().to_gstring());
 
         std::mem::forget(as_obj);
         cast_is_valid
@@ -354,7 +345,8 @@ impl<T: GodotClass> RawGd<T> {
         rtti.check_type::<T>()
     }
 
-    pub(super) fn obj_sys(&self) -> sys::GDExtensionObjectPtr {
+    // Not pub(super) because used by godot::meta::args::ObjectArg.
+    pub(crate) fn obj_sys(&self) -> sys::GDExtensionObjectPtr {
         self.obj as sys::GDExtensionObjectPtr
     }
 
@@ -536,12 +528,10 @@ impl<T: GodotClass> GodotConvert for RawGd<T> {
 }
 
 impl<T: GodotClass> ToGodot for RawGd<T> {
-    fn to_godot(&self) -> Self::Via {
-        self.clone()
-    }
+    type ToVia<'v> = Self;
 
-    fn into_godot(self) -> Self::Via {
-        self
+    fn to_godot(&self) -> Self::ToVia<'_> {
+        self.clone()
     }
 }
 
@@ -554,8 +544,11 @@ impl<T: GodotClass> FromGodot for RawGd<T> {
 impl<T: GodotClass> GodotType for RawGd<T> {
     type Ffi = Self;
 
-    fn to_ffi(&self) -> Self::Ffi {
-        self.clone()
+    type ToFfi<'f> = RefArg<'f, RawGd<T>>
+    where Self: 'f;
+
+    fn to_ffi(&self) -> Self::ToFfi<'_> {
+        RefArg::new(self)
     }
 
     fn into_ffi(self) -> Self::Ffi {
@@ -604,8 +597,13 @@ impl<T: GodotClass> GodotFfiVariant for RawGd<T> {
 }
 
 impl<T: GodotClass> GodotNullableFfi for RawGd<T> {
-    fn flatten_option(opt: Option<Self>) -> Self {
-        opt.unwrap_or_else(Self::null)
+    /// Create a new object representing a null in Godot.
+    fn null() -> Self {
+        Self {
+            obj: ptr::null_mut(),
+            cached_rtti: None,
+            cached_storage_ptr: InstanceCache::null(),
+        }
     }
 
     fn is_null(&self) -> bool {
@@ -690,7 +688,8 @@ pub unsafe fn raw_object_init(
     object_ptr
 }
 
-pub(super) fn object_ffi_to_variant<T: GodotFfi>(self_: &T) -> Variant {
+// Used by godot::meta::args::ObjectArg + local impl GodotFfiVariant.
+pub(crate) fn object_ffi_to_variant<T: GodotFfi>(self_: &T) -> Variant {
     // The conversion method `object_to_variant` DOES increment the reference-count of the object; so nothing to do here.
     // (This behaves differently in the opposite direction `variant_to_object`.)
 
@@ -710,7 +709,8 @@ pub(super) fn object_ffi_to_variant<T: GodotFfi>(self_: &T) -> Variant {
     }
 }
 
-pub(super) fn object_as_arg_ptr<F>(_object_ptr_field: &*mut F) -> sys::GDExtensionConstTypePtr {
+// Used by godot::meta::args::ObjectArg.
+pub(crate) fn object_as_arg_ptr<F>(_object_ptr_field: &*mut F) -> sys::GDExtensionConstTypePtr {
     // Be careful when refactoring this code. Address of field pointer matters, copying it into a local variable will create use-after-free.
 
     // No need to call self.check_rtti("as_arg_ptr") here, since this is already done in ToGodot impl.

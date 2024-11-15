@@ -530,6 +530,17 @@ impl FnParam {
     }
 }
 
+impl fmt::Debug for FnParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let def_val = self
+            .default_value
+            .as_ref()
+            .map_or(String::new(), |v| format!(" (default {v})"));
+
+        write!(f, "{}: {}{}", self.name, self.type_, def_val)
+    }
+}
+
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
 pub struct FnReturn {
@@ -588,8 +599,8 @@ pub struct GodotTy {
 
 #[derive(Clone, Debug)]
 pub enum RustTy {
-    /// `bool`, `Vector3i`, `Array`
-    BuiltinIdent(Ident),
+    /// `bool`, `Vector3i`, `Array`, `GString`
+    BuiltinIdent { ty: Ident, arg_passing: ArgPassing },
 
     /// `Array<i32>`
     ///
@@ -646,17 +657,6 @@ impl RustTy {
         }
     }
 
-    /// Returns `( <field tokens>, <needs .consume_object()> )`.
-    pub fn default_extender_field_decl(&self) -> (TokenStream, bool) {
-        match self {
-            RustTy::EngineClass { inner_class, .. } => {
-                let cow_tokens = quote! { ObjectCow<crate::classes::#inner_class> };
-                (cow_tokens, true)
-            }
-            other => (other.to_token_stream(), false),
-        }
-    }
-
     pub fn return_decl(&self) -> TokenStream {
         match self {
             Self::EngineClass { tokens, .. } => quote! { -> Option<#tokens> },
@@ -668,7 +668,7 @@ impl RustTy {
 impl ToTokens for RustTy {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         match self {
-            RustTy::BuiltinIdent(ident) => ident.to_tokens(tokens),
+            RustTy::BuiltinIdent { ty: ident, .. } => ident.to_tokens(tokens),
             RustTy::BuiltinArray { elem_type } => elem_type.to_tokens(tokens),
             RustTy::RawPointer {
                 inner,
@@ -684,6 +684,21 @@ impl ToTokens for RustTy {
             RustTy::ExtenderReceiver { tokens: path } => path.to_tokens(tokens),
         }
     }
+}
+
+impl fmt::Display for RustTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_token_stream().to_string().replace(" ", ""))
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ArgPassing {
+    ByValue,
+    ByRef,
+    ImplAsArg,
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------

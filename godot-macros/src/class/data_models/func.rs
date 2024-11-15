@@ -5,6 +5,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::class::RpcAttr;
 use crate::util::{bail_fn, ident, safe_ident};
 use crate::{util, ParseResult};
 use proc_macro2::{Group, Ident, TokenStream, TokenTree};
@@ -14,11 +15,20 @@ use quote::{format_ident, quote};
 pub struct FuncDefinition {
     /// Refined signature, with higher level info and renamed parameters.
     pub signature_info: SignatureInfo,
+
     /// The function's non-gdext attributes (all except #[func]).
     pub external_attributes: Vec<venial::Attribute>,
+
     /// The name the function will be exposed as in Godot. If `None`, the Rust function name is used.
-    pub rename: Option<String>,
+    ///
+    /// This can differ from the name in [`signature_info`] if the user has used `#[func(rename)]` or for script-virtual functions.
+    pub registered_name: Option<String>,
+
+    /// True for script-virtual functions.
     pub is_script_virtual: bool,
+
+    /// Information about the RPC configuration, if provided.
+    pub rpc_info: Option<RpcAttr>,
 }
 
 /// Returns a C function which acts as the callback when a virtual method of this instance is invoked.
@@ -81,8 +91,8 @@ pub fn make_method_registration(
     // String literals
     let method_name = &signature_info.method_name;
     let class_name_str = class_name.to_string();
-    let method_name_str = if let Some(rename) = func_definition.rename {
-        rename
+    let method_name_str = if let Some(updated_name) = func_definition.registered_name {
+        updated_name
     } else {
         method_name.to_string()
     };

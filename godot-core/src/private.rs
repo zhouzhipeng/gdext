@@ -8,7 +8,9 @@
 pub use crate::gen::classes::class_macros;
 pub use crate::obj::rtti::ObjectRtti;
 pub use crate::registry::callbacks;
-pub use crate::registry::plugin::{ClassPlugin, ErasedRegisterFn, PluginItem};
+pub use crate::registry::plugin::{
+    ClassPlugin, ErasedRegisterFn, ErasedRegisterRpcsFn, InherentImpl, PluginItem,
+};
 pub use crate::storage::{as_storage, Storage};
 pub use sys::out;
 
@@ -21,7 +23,6 @@ use crate::meta::CallContext;
 use crate::sys;
 use std::sync::{atomic, Arc, Mutex};
 use sys::Global;
-
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Global variables
 
@@ -128,6 +129,22 @@ pub(crate) fn iterate_plugins(mut visitor: impl FnMut(&ClassPlugin)) {
     sys::plugin_foreach!(__GODOT_PLUGIN_REGISTRY; visitor);
 }
 
+#[cfg(feature = "codegen-full")] // Remove if used in other scenarios.
+pub(crate) fn find_inherent_impl(class_name: crate::meta::ClassName) -> Option<InherentImpl> {
+    // We do this manually instead of using `iterate_plugins()` because we want to break as soon as we find a match.
+    let plugins = __godot_rust_plugin___GODOT_PLUGIN_REGISTRY.lock().unwrap();
+
+    plugins.iter().find_map(|elem| {
+        if elem.class_name == class_name {
+            if let PluginItem::InherentImpl(inherent_impl) = &elem.item {
+                return Some(inherent_impl.clone());
+            }
+        }
+
+        None
+    })
+}
+
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Traits and types
 
@@ -200,6 +217,7 @@ pub fn is_class_runtime(is_tool: bool) -> bool {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Panic handling
 
+#[cfg(debug_assertions)]
 #[derive(Debug)]
 struct GodotPanicInfo {
     line: u32,
@@ -328,12 +346,15 @@ where
     F: FnOnce() -> R + std::panic::UnwindSafe,
     S: std::fmt::Display,
 {
+    #[cfg(debug_assertions)]
     let info: Arc<Mutex<Option<GodotPanicInfo>>> = Arc::new(Mutex::new(None));
 
-    // Back up previous hook, set new one
-    let prev_hook = std::panic::take_hook();
-    {
+    // Back up previous hook, set new one.
+    #[cfg(debug_assertions)]
+    let prev_hook = {
         let info = info.clone();
+        let prev_hook = std::panic::take_hook();
+
         std::panic::set_hook(Box::new(move |panic_info| {
             if let Some(location) = panic_info.location() {
                 *info.lock().unwrap() = Some(GodotPanicInfo {
@@ -345,40 +366,60 @@ where
                 eprintln!("panic occurred, but can't get location information");
             }
         }));
-    }
 
-    // Run code that should panic, restore hook
+        prev_hook
+    };
+
+    // Run code that should panic, restore hook.
     let panic = std::panic::catch_unwind(code);
+
+    // Restore the previous panic hook if in Debug mode.
+    #[cfg(debug_assertions)]
     std::panic::set_hook(prev_hook);
 
     match panic {
         Ok(result) => Ok(result),
         Err(err) => {
             // Flush, to make sure previous Rust output (e.g. test announcement, or debug prints during app) have been printed
-            // TODO write custom panic handler and move this there, before panic backtrace printing
+            // TODO write custom panic handler and move this there, before panic backtrace printing.
             flush_stdout();
 
-            let guard = info.lock().unwrap();
-            let info = guard.as_ref().expect("no panic info available");
+            // Handle panic info only in Debug mode.
+            #[cfg(debug_assertions)]
+            {
+                let msg = extract_panic_message(err);
+                let mut msg = format_panic_message(msg);
 
-            if print {
-                godot_error!(
-                    "Rust function panicked at {}:{}.\n  Context: {}",
-                    info.file,
-                    info.line,
-                    error_context()
-                );
-                //eprintln!("Backtrace:\n{}", info.backtrace);
+                // Try to add location information.
+                if let Ok(guard) = info.lock() {
+                    if let Some(info) = guard.as_ref() {
+                        msg = format!("{}\n  at {}:{}", msg, info.file, info.line);
+                    }
+                }
+
+                if print {
+                    godot_error!(
+                        "Rust function panicked: {}\n  Context: {}",
+                        msg,
+                        error_context()
+                    );
+                    //eprintln!("Backtrace:\n{}", info.backtrace);
+                }
+
+                Err(msg)
             }
 
-            let msg = extract_panic_message(err);
-            let msg = format_panic_message(msg);
+            #[cfg(not(debug_assertions))]
+            {
+                let msg = extract_panic_message(err);
+                let msg = format_panic_message(msg);
 
-            if print {
-                godot_error!("{msg}");
+                if print {
+                    godot_error!("{msg}");
+                }
+
+                Err(msg)
             }
-
-            Err(msg)
         }
     }
 }

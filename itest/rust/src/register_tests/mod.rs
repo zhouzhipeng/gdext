@@ -10,8 +10,11 @@ mod conversion_test;
 mod derive_godotconvert_test;
 mod func_test;
 mod gdscript_ffi_test;
-mod keyword_parameters_test;
+mod naming_tests;
 mod option_ffi_test;
+mod register_docs_test;
+#[cfg(feature = "codegen-full")]
+mod rpc_test;
 mod var_test;
 
 #[cfg(since_api = "4.3")]

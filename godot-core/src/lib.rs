@@ -15,11 +15,11 @@
 pub mod builder;
 pub mod builtin;
 pub mod classes;
-#[cfg(all(since_api = "4.3", feature = "docs"))]
+#[cfg(all(since_api = "4.3", feature = "register-docs"))]
 pub mod docs;
 #[doc(hidden)]
 pub mod possibly_docs {
-    #[cfg(all(since_api = "4.3", feature = "docs"))]
+    #[cfg(all(since_api = "4.3", feature = "register-docs"))]
     pub use crate::docs::*;
 }
 pub mod global;
@@ -35,7 +35,7 @@ pub use godot_ffi as sys;
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Validations (see also godot/lib.rs)
 
-#[cfg(all(feature = "docs", before_api = "4.3"))]
+#[cfg(all(feature = "register-docs", before_api = "4.3"))]
 compile_error!("Generating editor docs for Rust symbols requires at least Godot 4.3.");
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -48,6 +48,7 @@ compile_error!("Generating editor docs for Rust symbols requires at least Godot 
 #[allow(clippy::let_unit_value)] // let args = ();
 #[allow(clippy::wrong_self_convention)] // to_string() is const
 #[allow(clippy::upper_case_acronyms)] // TODO remove this line once we transform names
+#[allow(clippy::needless_lifetimes)]  // the following explicit lifetimes could be elided: 'a
 #[allow(unreachable_code, clippy::unimplemented)] // TODO remove once #153 is implemented
 mod gen {
     include!(concat!(env!("OUT_DIR"), "/mod.rs"));

@@ -13,6 +13,7 @@ use godot::classes::{
     file_access, Area2D, Camera3D, Engine, FileAccess, IRefCounted, Node, Node3D, Object,
     RefCounted,
 };
+#[allow(deprecated)]
 use godot::global::instance_from_id;
 use godot::meta::{FromGodot, GodotType, ToGodot};
 use godot::obj::{Base, Gd, Inherits, InstanceId, NewAlloc, NewGd, RawGd};
@@ -67,7 +68,9 @@ fn object_user_roundtrip_write() {
 
     let obj: Gd<RefcPayload> = Gd::from_object(user);
     assert_eq!(obj.bind().value, value);
-    let raw = obj.to_ffi();
+
+    // Use into_ffi() instead of to_ffi(), as the latter returns a reference and isn't used for returns anymore.
+    let raw = obj.into_ffi();
 
     let raw2 = unsafe {
         RawGd::<RefcPayload>::new_with_uninit(|ptr| {
@@ -93,6 +96,20 @@ fn object_engine_roundtrip() {
     let obj2 = Gd::from_ffi(raw2);
     assert_eq!(obj2.get_position(), pos);
     obj.free();
+}
+
+#[itest]
+fn object_null_argument() {
+    // Objects currently use ObjectArg instead of RefArg, so this scenario shouldn't occur. Test can be updated if code is refactored.
+
+    let null_obj = Option::<Gd<Node>>::None;
+
+    let via = null_obj.to_godot();
+    let ffi = via.to_ffi();
+
+    expect_panic("not yet implemented: pass objects through RefArg", || {
+        ffi.to_godot();
+    });
 }
 
 #[itest]
@@ -171,6 +188,7 @@ fn object_instance_from_id() {
 
     let instance_id = node.instance_id();
 
+    #[allow(deprecated)]
     let gd_from_instance_id = instance_from_id(instance_id.to_i64())
         .expect("instance should be valid")
         .cast::<Node>();
@@ -182,6 +200,7 @@ fn object_instance_from_id() {
 
 #[itest]
 fn object_instance_from_invalid_id() {
+    #[allow(deprecated)]
     let gd_from_instance_id = instance_from_id(0);
 
     assert!(
@@ -195,7 +214,7 @@ fn object_from_instance_id_inherits_type() {
     let descr = GString::from("some very long description");
 
     let mut node: Gd<Node3D> = Node3D::new_alloc();
-    node.set_editor_description(descr.clone());
+    node.set_editor_description(&descr);
 
     let id = node.instance_id();
 
@@ -229,7 +248,7 @@ fn object_dynamic_free() {
     let mut obj = ObjPayload::new_alloc();
     let id = obj.instance_id();
 
-    obj.call("free".into(), &[]);
+    obj.call("free", &[]);
 
     Gd::<ObjPayload>::try_from_instance_id(id)
         .expect_err("dynamic free() call must destroy object");
@@ -275,7 +294,7 @@ fn object_engine_freed_argument_passing(ctx: &TestContext) {
     // Destroy object and then pass it to a Godot engine API.
     node.free();
     expect_panic("pass freed Gd<T> to Godot engine API (T=Node)", || {
-        tree.add_child(node2);
+        tree.add_child(&node2);
     });
 }
 
@@ -306,7 +325,7 @@ fn object_user_freed_argument_passing() {
     // Destroy object and then pass it to a Godot engine API (upcast itself works, see other tests).
     obj.free();
     expect_panic("pass freed Gd<T> to Godot engine API (T=user)", || {
-        engine.register_singleton("NeverRegistered".into(), obj2);
+        engine.register_singleton("NeverRegistered", &obj2);
     });
 }
 
@@ -326,7 +345,7 @@ fn object_user_dynamic_free_during_bind() {
 
     // This technically triggers UB, but in practice no one accesses the references.
     // There is no alternative to test this, see destroy_storage() comments.
-    copy.call("free".into(), &[]);
+    copy.call("free", &[]);
 
     drop(guard);
     assert!(
@@ -344,7 +363,7 @@ fn object_user_call_after_free() {
     obj.free();
 
     expect_panic("call() on dead user object", move || {
-        let _ = copy.call("get_instance_id".into(), &[]);
+        let _ = copy.call("get_instance_id", &[]);
     });
 }
 
@@ -366,7 +385,7 @@ fn object_engine_use_after_free_varcall() {
     node.free();
 
     expect_panic("call method on dead engine object", move || {
-        copy.call_deferred("get_position".into(), &[]);
+        copy.call_deferred("get_position", &[]);
     });
 }
 
@@ -501,10 +520,8 @@ fn object_engine_convert_variant_nil() {
 
 #[itest]
 fn object_engine_returned_refcount() {
-    let Some(file) = FileAccess::open(
-        "res://itest.gdextension".into(),
-        file_access::ModeFlags::READ,
-    ) else {
+    let Some(file) = FileAccess::open("res://itest.gdextension", file_access::ModeFlags::READ)
+    else {
         panic!("failed to open file used to test FileAccess")
     };
     assert!(file.is_open());
@@ -654,7 +671,7 @@ fn object_engine_accept_polymorphic() {
     let expected_name = StringName::from("Node name");
     let expected_class = GString::from("Camera3D");
 
-    node.set_name(GString::from(&expected_name));
+    node.set_name(expected_name.arg());
 
     let actual_name = accept_node(node.clone());
     assert_eq!(actual_name, expected_name);
@@ -729,10 +746,7 @@ fn object_user_upcast_mut() {
     let object = obj.upcast_mut::<Object>();
     assert_eq!(ref_instance_id(object), id);
     assert_eq!(object.get_class(), GString::from("RefcPayload"));
-    assert_eq!(
-        object.call("to_string".into(), &[]),
-        "value=17943".to_variant()
-    );
+    assert_eq!(object.call("to_string", &[]), "value=17943".to_variant());
 }
 
 #[itest]
@@ -803,7 +817,7 @@ fn object_engine_refcounted_free() {
 fn object_user_double_free() {
     let mut obj = ObjPayload::new_alloc();
     let obj2 = obj.clone();
-    obj.call("free".into(), &[]);
+    obj.call("free", &[]);
 
     expect_panic("double free()", move || {
         obj2.free();
@@ -834,7 +848,7 @@ fn object_get_scene_tree(ctx: &TestContext) {
     let node = Node3D::new_alloc();
 
     let mut tree = ctx.scene_tree.clone();
-    tree.add_child(node);
+    tree.add_child(&node);
 
     let count = tree.get_child_count();
     assert_eq!(count, 1);
@@ -872,6 +886,11 @@ impl ObjPayload {
     #[func]
     fn do_panic(&self) {
         panic!("do_panic exploded");
+    }
+
+    // Obtain the line number of the panic!() call above; keep equidistant to do_panic() method.
+    pub fn get_panic_line() -> u32 {
+        line!() - 5
     }
 }
 
@@ -945,7 +964,7 @@ pub mod object_test_gd {
     impl nested::ObjectTest {
         #[func]
         fn pass_object(&self, object: Gd<Object>) -> i64 {
-            let i = object.get("i".into()).to();
+            let i = object.get("i").to();
             object.free();
             i
         }
@@ -957,12 +976,12 @@ pub mod object_test_gd {
 
         #[func]
         fn pass_refcounted(&self, object: Gd<RefCounted>) -> i64 {
-            object.get("i".into()).to()
+            object.get("i").to()
         }
 
         #[func]
         fn pass_refcounted_as_object(&self, object: Gd<Object>) -> i64 {
-            object.get("i".into()).to()
+            object.get("i").to()
         }
 
         #[func]
@@ -982,7 +1001,7 @@ pub mod object_test_gd {
 
         #[func]
         fn return_nested_self() -> Array<Gd<<Self as GodotClass>::Base>> {
-            array![Self::return_self().upcast()]
+            array![&Self::return_self().upcast()]
         }
     }
 
@@ -1039,7 +1058,7 @@ fn double_use_reference() {
     emitter
         .clone()
         .upcast::<Object>()
-        .connect("do_use".into(), double_use.callable("use_1"));
+        .connect("do_use", &double_use.callable("use_1"));
 
     let guard = double_use.bind();
 
@@ -1048,7 +1067,7 @@ fn double_use_reference() {
     emitter
         .clone()
         .upcast::<Object>()
-        .emit_signal("do_use".into(), &[]);
+        .emit_signal("do_use", &[]);
 
     assert!(guard.used.get(), "use_1 was not called");
 
@@ -1057,11 +1076,3 @@ fn double_use_reference() {
     double_use.free();
     emitter.free();
 }
-
-// ----------------------------------------------------------------------------------------------------------------------------------------------
-
-// There isn't a good way to test editor plugins, but we can at least declare one to ensure that the macro
-// compiles.
-#[derive(GodotClass)]
-#[class(no_init, base = EditorPlugin, editor_plugin, tool)]
-struct CustomEditorPlugin;

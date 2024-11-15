@@ -25,10 +25,13 @@ impl<T> GodotType for Option<T>
 where
     T: GodotType,
     T::Ffi: GodotNullableFfi,
+    for<'f> T::ToFfi<'f>: GodotNullableFfi,
 {
     type Ffi = T::Ffi;
 
-    fn to_ffi(&self) -> Self::Ffi {
+    type ToFfi<'f> = T::ToFfi<'f>;
+
+    fn to_ffi(&self) -> Self::ToFfi<'_> {
         GodotNullableFfi::flatten_option(self.as_ref().map(|t| t.to_ffi()))
     }
 
@@ -91,13 +94,18 @@ where
 impl<T: ToGodot> ToGodot for Option<T>
 where
     Option<T::Via>: GodotType,
+    for<'v, 'f> T::ToVia<'v>: GodotType<
+        // Associated types need to be nullable.
+        Ffi: GodotNullableFfi,
+        ToFfi<'f>: GodotNullableFfi,
+    >,
 {
-    fn to_godot(&self) -> Self::Via {
-        self.as_ref().map(ToGodot::to_godot)
-    }
+    type ToVia<'v> = Option<T::ToVia<'v>>
+    // type ToVia<'v> = Self::Via
+    where Self: 'v;
 
-    fn into_godot(self) -> Self::Via {
-        self.map(ToGodot::into_godot)
+    fn to_godot(&self) -> Self::ToVia<'_> {
+        self.as_ref().map(ToGodot::to_godot)
     }
 
     fn to_variant(&self) -> Variant {
@@ -154,8 +162,9 @@ macro_rules! impl_godot_scalar {
     ($T:ty as $Via:ty, $err:path, $param_metadata:expr) => {
         impl GodotType for $T {
             type Ffi = $Via;
+            type ToFfi<'f> = $Via;
 
-            fn to_ffi(&self) -> Self::Ffi {
+            fn to_ffi(&self) -> Self::ToFfi<'_> {
                 (*self).into()
             }
 
@@ -187,8 +196,9 @@ macro_rules! impl_godot_scalar {
     ($T:ty as $Via:ty, $param_metadata:expr; lossy) => {
         impl GodotType for $T {
             type Ffi = $Via;
+            type ToFfi<'f> = $Via;
 
-            fn to_ffi(&self) -> Self::Ffi {
+            fn to_ffi(&self) -> Self::ToFfi<'_> {
                 *self as $Via
             }
 
@@ -225,7 +235,9 @@ macro_rules! impl_godot_scalar {
         }
 
         impl ToGodot for $T {
-            fn to_godot(&self) -> Self::Via {
+            type ToVia<'v> = Self::Via;
+
+            fn to_godot(&self) -> Self::ToVia<'_> {
                *self
             }
         }
@@ -235,6 +247,8 @@ macro_rules! impl_godot_scalar {
                 Ok(via)
             }
         }
+
+        $crate::impl_asarg_by_value!($T);
     };
 }
 
@@ -286,8 +300,9 @@ impl_godot_scalar!(
 
 impl GodotType for u64 {
     type Ffi = i64;
+    type ToFfi<'f> = i64;
 
-    fn to_ffi(&self) -> Self::Ffi {
+    fn to_ffi(&self) -> Self::ToFfi<'_> {
         *self as i64
     }
 
@@ -308,7 +323,9 @@ impl GodotConvert for u64 {
 }
 
 impl ToGodot for u64 {
-    fn to_godot(&self) -> Self::Via {
+    type ToVia<'v> = u64;
+
+    fn to_godot(&self) -> Self::ToVia<'_> {
         *self
     }
 
@@ -341,28 +358,32 @@ impl FromGodot for u64 {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Collections
 
-// impl<T: ArrayElement> GodotConvert for Vec<T> {
-//     type Via = Array<T>;
-// }
-//
-// impl<T: ArrayElement> ToGodot for Vec<T> {
-//     fn to_godot(&self) -> Self::Via {
-//         Array::from(self.as_slice())
-//     }
-// }
-//
-// impl<T: ArrayElement> FromGodot for Vec<T> {
-//     fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
-//         Ok(via.iter_shared().collect())
-//     }
-// }
+impl<T: ArrayElement> GodotConvert for Vec<T> {
+    type Via = Array<T>;
+}
+
+impl<T: ArrayElement> ToGodot for Vec<T> {
+    type ToVia<'v> = Array<T>;
+
+    fn to_godot(&self) -> Self::ToVia<'_> {
+        Array::from(self.as_slice())
+    }
+}
+
+impl<T: ArrayElement> FromGodot for Vec<T> {
+    fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
+        Ok(via.iter_shared().collect())
+    }
+}
 
 impl<T: ArrayElement, const LEN: usize> GodotConvert for [T; LEN] {
     type Via = Array<T>;
 }
 
 impl<T: ArrayElement, const LEN: usize> ToGodot for [T; LEN] {
-    fn to_godot(&self) -> Self::Via {
+    type ToVia<'v> = Array<T>;
+
+    fn to_godot(&self) -> Self::ToVia<'_> {
         Array::from(self)
     }
 }
@@ -400,7 +421,10 @@ impl<T: ArrayElement> GodotConvert for &[T] {
 }
 
 impl<T: ArrayElement> ToGodot for &[T] {
-    fn to_godot(&self) -> Self::Via {
+    type ToVia<'v> = Array<T>
+    where Self: 'v;
+
+    fn to_godot(&self) -> Self::ToVia<'_> {
         Array::from(*self)
     }
 }
@@ -419,7 +443,9 @@ macro_rules! impl_pointer_convert {
         }
 
         impl ToGodot for $Ptr {
-            fn to_godot(&self) -> Self::Via {
+            type ToVia<'v> = i64;
+
+            fn to_godot(&self) -> Self::ToVia<'_> {
                 *self as i64
             }
         }

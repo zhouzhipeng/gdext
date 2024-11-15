@@ -13,7 +13,7 @@ use crate::class::{
     SignatureInfo,
 };
 use crate::util::{bail, ident, path_ends_with_complex, require_api_version, KvParser};
-use crate::{util, ParseResult};
+use crate::{handle_mutually_exclusive_keys, util, ParseResult};
 
 pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     let class = item
@@ -21,8 +21,12 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         .ok_or_else(|| venial::Error::new("Not a valid struct"))?;
 
     let named_fields = named_fields(class)?;
-    let struct_cfg = parse_struct_attributes(class)?;
-    let fields = parse_fields(named_fields, struct_cfg.init_strategy)?;
+    let mut struct_cfg = parse_struct_attributes(class)?;
+    let mut fields = parse_fields(named_fields, struct_cfg.init_strategy)?;
+    let is_editor_plugin = struct_cfg.is_editor_plugin();
+
+    let mut deprecations = std::mem::take(&mut struct_cfg.deprecations);
+    deprecations.append(&mut fields.deprecations);
 
     let class_name = &class.name;
     let class_name_str: String = struct_cfg
@@ -30,19 +34,25 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         .map_or_else(|| class.name.clone(), |rename| rename)
         .to_string();
 
-    let class_name_cstr = util::c_str(&class_name_str);
+    // Determine if we can use ASCII for the class name (in most cases).
+    let class_name_allocation = if class_name_str.is_ascii() {
+        let c_str = util::c_str(&class_name_str);
+        quote! { ClassName::alloc_next_ascii(#c_str) }
+    } else {
+        quote! { ClassName::alloc_next_unicode(#class_name_str) }
+    };
+
     let class_name_obj = util::class_name_obj(class_name);
 
-    let is_editor_plugin = struct_cfg.is_editor_plugin;
-    let is_hidden = struct_cfg.is_hidden;
+    let is_internal = struct_cfg.is_internal;
     let base_ty = &struct_cfg.base_ty;
-    #[cfg(all(feature = "docs", since_api = "4.3"))]
+    #[cfg(all(feature = "register-docs", since_api = "4.3"))]
     let docs = crate::docs::make_definition_docs(
         base_ty.to_string(),
         &class.attributes,
         &fields.all_fields,
     );
-    #[cfg(not(all(feature = "docs", since_api = "4.3")))]
+    #[cfg(not(all(feature = "register-docs", since_api = "4.3")))]
     let docs = quote! {};
     let base_class = quote! { ::godot::classes::#base_ty };
     let base_class_name_obj = util::class_name_obj(&base_class);
@@ -75,7 +85,6 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     let mut create_fn = quote! { None };
     let mut recreate_fn = quote! { None };
     let mut is_instantiable = true;
-    let deprecations = &fields.deprecations;
 
     match struct_cfg.init_strategy {
         InitStrategy::Generated => {
@@ -121,7 +130,7 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
                 // Optimization note: instead of lazy init, could use separate static which is manually initialized during registration.
                 static CLASS_NAME: std::sync::OnceLock<ClassName> = std::sync::OnceLock::new();
 
-                let name: &'static ClassName = CLASS_NAME.get_or_init(|| ClassName::alloc_next(#class_name_cstr));
+                let name: &'static ClassName = CLASS_NAME.get_or_init(|| #class_name_allocation);
                 *name
             }
         }
@@ -153,7 +162,7 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
                 default_get_virtual_fn: #default_get_virtual_fn,
                 is_tool: #is_tool,
                 is_editor_plugin: #is_editor_plugin,
-                is_hidden: #is_hidden,
+                is_internal: #is_internal,
                 is_instantiable: #is_instantiable,
                 #docs
             },
@@ -201,9 +210,15 @@ struct ClassAttributes {
     base_ty: Ident,
     init_strategy: InitStrategy,
     is_tool: bool,
-    is_editor_plugin: bool,
-    is_hidden: bool,
+    is_internal: bool,
     rename: Option<Ident>,
+    deprecations: Vec<TokenStream>,
+}
+
+impl ClassAttributes {
+    fn is_editor_plugin(&self) -> bool {
+        self.base_ty == ident("EditorPlugin")
+    }
 }
 
 fn make_godot_init_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
@@ -240,6 +255,12 @@ fn make_user_class_impl(
     is_tool: bool,
     all_fields: &[Field],
 ) -> (TokenStream, bool) {
+    #[cfg(feature = "codegen-full")]
+    let rpc_registrations =
+        quote! { ::godot::register::private::auto_register_rpcs::<#class_name>(self); };
+    #[cfg(not(feature = "codegen-full"))]
+    let rpc_registrations = TokenStream::new();
+
     let onready_inits = {
         let mut onready_fields = all_fields
             .iter()
@@ -295,6 +316,7 @@ fn make_user_class_impl(
             }
 
             fn __before_ready(&mut self) {
+                #rpc_registrations
                 #onready_inits
             }
 
@@ -310,9 +332,9 @@ fn parse_struct_attributes(class: &venial::Struct) -> ParseResult<ClassAttribute
     let mut base_ty = ident("RefCounted");
     let mut init_strategy = InitStrategy::UserDefined;
     let mut is_tool = false;
-    let mut is_editor_plugin = false;
-    let mut is_hidden = false;
+    let mut is_internal = false;
     let mut rename: Option<Ident> = None;
+    let mut deprecations = vec![];
 
     // #[class] attribute on struct
     if let Some(mut parser) = KvParser::parse(&class.attributes, "class")? {
@@ -333,50 +355,45 @@ fn parse_struct_attributes(class: &venial::Struct) -> ParseResult<ClassAttribute
             is_tool = true;
         }
 
-        // #[class(editor_plugin)]
-        if let Some(attr_key) = parser.handle_alone_with_span("editor_plugin")? {
-            is_editor_plugin = true;
-
-            // Requires #[class(tool, base=EditorPlugin)].
-            // The base=EditorPlugin check should come first to create the best compile errors since it's more complex to resolve.
-            // See https://github.com/godot-rust/gdext/pull/773
-            if base_ty != ident("EditorPlugin") {
-                return bail!(
-                    attr_key,
-                    "#[class(editor_plugin)] requires additional key-value `base=EditorPlugin`"
-                );
-            }
-            if !is_tool {
-                return bail!(
-                    attr_key,
-                    "#[class(editor_plugin)] requires additional key `tool`"
-                );
-            }
+        // Deprecated #[class(editor_plugin)]
+        if let Some(_attr_key) = parser.handle_alone_with_span("editor_plugin")? {
+            deprecations.push(quote! {
+                ::godot::__deprecated::emit_deprecated_warning!(class_editor_plugin);
+            });
         }
 
         // #[class(rename = NewName)]
         rename = parser.handle_ident("rename")?;
 
-        // #[class(hidden)]
-        // TODO consider naming this "internal"; godot-cpp uses that terminology:
-        // https://github.com/godotengine/godot-cpp/blob/master/include/godot_cpp/core/class_db.hpp#L327
+        // #[class(internal)]
+        // Named "internal" following Godot terminology: https://github.com/godotengine/godot-cpp/blob/master/include/godot_cpp/core/class_db.hpp#L327
+        if let Some(span) = parser.handle_alone_with_span("internal")? {
+            require_api_version!("4.2", span, "#[class(internal)]")?;
+            is_internal = true;
+        }
+
+        // Deprecated #[class(hidden)]
         if let Some(span) = parser.handle_alone_with_span("hidden")? {
             require_api_version!("4.2", span, "#[class(hidden)]")?;
-            is_hidden = true;
+            is_internal = true;
+
+            deprecations.push(quote! {
+                ::godot::__deprecated::emit_deprecated_warning!(class_hidden);
+            });
         }
 
         parser.finish()?;
     }
 
-    post_validate(&base_ty, is_tool, is_editor_plugin)?;
+    post_validate(&base_ty, is_tool)?;
 
     Ok(ClassAttributes {
         base_ty,
         init_strategy,
         is_tool,
-        is_editor_plugin,
-        is_hidden,
+        is_internal,
         rename,
+        deprecations,
     })
 }
 
@@ -571,23 +588,17 @@ fn handle_opposite_keys(
     attribute: &str,
 ) -> ParseResult<Option<bool>> {
     let antikey = format!("no_{}", key);
+    let result = handle_mutually_exclusive_keys(parser, attribute, &[key, &antikey])?;
 
-    let is_key = parser.handle_alone(key)?;
-    let is_no_key = parser.handle_alone(&antikey)?;
-
-    match (is_key, is_no_key) {
-        (true, false) => Ok(Some(true)),
-        (false, true) => Ok(Some(false)),
-        (false, false) => Ok(None),
-        (true, true) => bail!(
-            parser.span(),
-            "#[{attribute}] attribute keys `{key}` and `{antikey}` are mutually exclusive",
-        ),
+    if let Some(idx) = result {
+        Ok(Some(idx == 0))
+    } else {
+        Ok(None)
     }
 }
 
 /// Checks more logical combinations of attributes.
-fn post_validate(base_ty: &Ident, is_tool: bool, is_editor_plugin: bool) -> ParseResult<()> {
+fn post_validate(base_ty: &Ident, is_tool: bool) -> ParseResult<()> {
     // TODO: this should be delegated to either:
     // a) the type system: have a trait IsTool which is implemented when #[class(tool)] is set.
     //    Then, for certain base classes, require a tool bound (e.g. generate method `fn type_check<T: IsTool>()`).
@@ -603,12 +614,6 @@ fn post_validate(base_ty: &Ident, is_tool: bool, is_editor_plugin: bool) -> Pars
         return bail!(
             base_ty,
             "Base class `{}` is a virtual extension class, which runs in the editor and thus requires #[class(tool)].",
-            base_ty
-        );
-    } else if class_name == "EditorPlugin" && !is_editor_plugin {
-        return bail!(
-            base_ty,
-            "Classes extending `{}` require #[class(editor_plugin)] to get registered as a plugin in the editor. See: https://godot-rust.github.io/book/recipes/editor-plugin/index.html", 
             base_ty
         );
     } else if is_class_editor && !is_tool {

@@ -9,7 +9,7 @@ use godot_ffi as sys;
 
 use crate::builtin::{inner, StringName, Variant, VariantArray};
 use crate::classes::Object;
-use crate::meta::{GodotType, ToGodot};
+use crate::meta::{CallContext, GodotType, ToGodot};
 use crate::obj::bounds::DynMemory;
 use crate::obj::Bounds;
 use crate::obj::{Gd, GodotClass, InstanceId};
@@ -46,15 +46,15 @@ impl Callable {
     pub fn from_object_method<T, S>(object: &Gd<T>, method_name: S) -> Self
     where
         T: GodotClass, // + Inherits<Object>,
-        S: Into<StringName>,
+        S: meta::AsArg<StringName>,
     {
-        // upcast not needed
-        let method = method_name.into();
+        meta::arg_into_ref!(method_name);
+
         unsafe {
             Self::new_with_uninit(|self_ptr| {
                 let ctor = sys::builtin_fn!(callable_from_object_method);
                 let raw = object.to_ffi();
-                let args = [raw.as_arg_ptr(), method.sys()];
+                let args = [raw.as_arg_ptr(), method_name.sys()];
                 ctor(self_ptr, args.as_ptr());
             })
         }
@@ -173,19 +173,19 @@ impl Callable {
     /// - If called on an invalid Callable then no error is printed, and `NIL` is returned.
     ///
     /// _Godot equivalent: `callv`_
-    pub fn callv(&self, arguments: VariantArray) -> Variant {
+    pub fn callv(&self, arguments: &VariantArray) -> Variant {
         self.as_inner().callv(arguments)
     }
 
     /// Returns a copy of this Callable with one or more arguments bound, reading them from an array.
     ///
     /// _Godot equivalent: `bindv`_
-    pub fn bindv(&self, arguments: VariantArray) -> Self {
+    pub fn bindv(&self, arguments: &VariantArray) -> Self {
         self.as_inner().bindv(arguments)
     }
 
     /// Returns the name of the method represented by this callable. If the callable is a lambda function,
-    /// returns the function's name.
+    /// returns the surrounding function's name.
     ///
     /// ## Known Bugs
     ///
@@ -340,6 +340,7 @@ impl fmt::Display for Callable {
 #[cfg(since_api = "4.2")]
 use custom_callable::*;
 
+use crate::meta;
 #[cfg(since_api = "4.2")]
 pub use custom_callable::RustCallable;
 
@@ -392,10 +393,19 @@ mod custom_callable {
     ) {
         let arg_refs: &[&Variant] = Variant::borrow_ref_slice(p_args, p_argument_count as usize);
 
-        let c: &mut C = CallableUserdata::inner_from_raw(callable_userdata);
+        let name = {
+            let c: &C = CallableUserdata::inner_from_raw(callable_userdata);
+            c.to_string()
+        };
+        let ctx = CallContext::custom_callable(name.as_str());
 
-        let result = c.invoke(arg_refs);
-        crate::meta::varcall_return_checked(result, r_return, r_error);
+        crate::private::handle_varcall_panic(&ctx, &mut *r_error, move || {
+            // Get the RustCallable again inside closure so it doesn't have to be UnwindSafe.
+            let c: &mut C = CallableUserdata::inner_from_raw(callable_userdata);
+            let result = c.invoke(arg_refs);
+            crate::meta::varcall_return_checked(result, r_return, r_error);
+            Ok(())
+        });
     }
 
     pub unsafe extern "C" fn rust_callable_call_fn<F>(
@@ -409,10 +419,19 @@ mod custom_callable {
     {
         let arg_refs: &[&Variant] = Variant::borrow_ref_slice(p_args, p_argument_count as usize);
 
-        let w: &mut FnWrapper<F> = CallableUserdata::inner_from_raw(callable_userdata);
+        let name = {
+            let w: &FnWrapper<F> = CallableUserdata::inner_from_raw(callable_userdata);
+            w.name.to_string()
+        };
+        let ctx = CallContext::custom_callable(name.as_str());
 
-        let result = (w.rust_function)(arg_refs);
-        crate::meta::varcall_return_checked(result, r_return, r_error);
+        crate::private::handle_varcall_panic(&ctx, &mut *r_error, move || {
+            // Get the FnWrapper again inside closure so the FnMut doesn't have to be UnwindSafe.
+            let w: &mut FnWrapper<F> = CallableUserdata::inner_from_raw(callable_userdata);
+            let result = (w.rust_function)(arg_refs);
+            crate::meta::varcall_return_checked(result, r_return, r_error);
+            Ok(())
+        });
     }
 
     pub unsafe extern "C" fn rust_callable_destroy<T>(callable_userdata: *mut std::ffi::c_void) {

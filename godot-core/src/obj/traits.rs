@@ -164,6 +164,16 @@ pub trait EngineEnum: Copy {
         Self::try_from_ord(ord)
             .unwrap_or_else(|| panic!("ordinal {ord} does not map to any enumerator"))
     }
+
+    // The name of the enumerator, as it appears in Rust.
+    //
+    // If the value does not match one of the known enumerators, the empty string is returned.
+    fn as_str(&self) -> &'static str;
+
+    // The equivalent name of the enumerator, as specified in Godot.
+    //
+    // If the value does not match one of the known enumerators, the empty string is returned.
+    fn godot_name(&self) -> &'static str;
 }
 
 /// Auto-implemented for all engine-provided bitfields.
@@ -234,7 +244,7 @@ pub trait IndexEnum: EngineEnum {
 #[diagnostic::on_unimplemented(
     message = "Class `{Self}` requires a `Base<T>` field",
     label = "missing field `_base: Base<...>`",
-    note = "A base field is required to access the base from within `self`, or when using script virtual functions",
+    note = "A base field is required to access the base from within `self`, for script-virtual functions or #[rpc] methods",
     note = "see also: https://godot-rust.github.io/book/register/classes.html#the-base-field"
 )]
 pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
@@ -294,7 +304,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     ///     fn process(&mut self, _delta: f64) {
     ///         let node = Node::new_alloc();
     ///         // fails because `add_child` requires a mutable reference.
-    ///         self.base().add_child(node);
+    ///         self.base().add_child(&node);
     ///     }
     /// }
     ///
@@ -334,7 +344,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     /// impl INode for MyClass {
     ///     fn process(&mut self, _delta: f64) {
     ///         let node = Node::new_alloc();
-    ///         self.base_mut().add_child(node);
+    ///         self.base_mut().add_child(&node);
     ///     }
     /// }
     ///
@@ -358,7 +368,7 @@ pub trait WithBaseField: GodotClass + Bounds<Declarer = bounds::DeclUser> {
     /// #[godot_api]
     /// impl INode for MyClass {
     ///     fn process(&mut self, _delta: f64) {
-    ///         self.base_mut().call("other_method".into(), &[]);
+    ///         self.base_mut().call("other_method", &[]);
     ///     }
     /// }
     ///
@@ -445,6 +455,7 @@ pub mod cap {
     use super::*;
     use crate::builtin::{StringName, Variant};
     use crate::obj::{Base, Bounds, Gd};
+    use std::any::Any;
 
     /// Trait for all classes that are default-constructible from the Godot engine.
     ///
@@ -548,6 +559,8 @@ pub mod cap {
         fn __register_methods();
         #[doc(hidden)]
         fn __register_constants();
+        #[doc(hidden)]
+        fn __register_rpcs(_: &mut dyn Any) {}
     }
 
     pub trait ImplementsGodotExports: GodotClass {

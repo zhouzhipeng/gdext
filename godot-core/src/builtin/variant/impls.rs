@@ -9,7 +9,9 @@ use super::*;
 use crate::builtin::*;
 use crate::global;
 use crate::meta::error::{ConvertError, FromVariantError};
-use crate::meta::{ArrayElement, GodotFfiVariant, GodotType, PropertyHintInfo, PropertyInfo};
+use crate::meta::{
+    ArrayElement, GodotFfiVariant, GodotType, PropertyHintInfo, PropertyInfo, RefArg,
+};
 use godot_ffi as sys;
 // For godot-cpp, see https://github.com/godotengine/godot-cpp/blob/master/include/godot_cpp/core/type_info.hpp.
 
@@ -22,7 +24,15 @@ use godot_ffi as sys;
 //
 // Therefore, we can use `init` to indicate when it must be initialized in 4.0.
 macro_rules! impl_ffi_variant {
-    ($T:ty, $from_fn:ident, $to_fn:ident $(; $godot_type_name:ident)?) => {
+    (ref $T:ty, $from_fn:ident, $to_fn:ident $(; $GodotTy:ident)?) => {
+        impl_ffi_variant!(@impls by_ref; $T, $from_fn, $to_fn $(; $GodotTy)?);
+    };
+    ($T:ty, $from_fn:ident, $to_fn:ident $(; $GodotTy:ident)?) => {
+        impl_ffi_variant!(@impls by_val; $T, $from_fn, $to_fn $(; $GodotTy)?);
+    };
+
+    // Implementations
+    (@impls $by_ref_or_val:ident; $T:ty, $from_fn:ident, $to_fn:ident $(; $GodotTy:ident)?) => {
         impl GodotFfiVariant for $T {
             fn ffi_to_variant(&self) -> Variant {
                 let variant = unsafe {
@@ -58,10 +68,7 @@ macro_rules! impl_ffi_variant {
 
         impl GodotType for $T {
             type Ffi = Self;
-
-            fn to_ffi(&self) -> Self::Ffi {
-                self.clone()
-            }
+            impl_ffi_variant!(@assoc_to_ffi $by_ref_or_val);
 
             fn into_ffi(self) -> Self::Ffi {
                 self
@@ -71,10 +78,12 @@ macro_rules! impl_ffi_variant {
                 Ok(ffi)
             }
 
-            impl_ffi_variant!(@godot_type_name $T $(, $godot_type_name)?);
+            impl_ffi_variant!(@godot_type_name $T $(, $GodotTy)?);
         }
 
         impl ArrayElement for $T {}
+
+        impl_ffi_variant!(@as_arg $by_ref_or_val $T);
     };
 
     (@godot_type_name $T:ty) => {
@@ -88,6 +97,30 @@ macro_rules! impl_ffi_variant {
             stringify!($godot_type_name).into()
         }
     };
+
+    (@assoc_to_ffi by_ref) => {
+        type ToFfi<'a> =  RefArg<'a, Self>;
+
+        fn to_ffi(&self) -> Self::ToFfi<'_> {
+            RefArg::new(self)
+        }
+    };
+
+    (@assoc_to_ffi by_val) => {
+        type ToFfi<'a> = Self;
+
+        fn to_ffi(&self) -> Self::ToFfi<'_> {
+            self.clone()
+        }
+    };
+
+    (@as_arg by_ref $T:ty) => {
+        $crate::meta::impl_asarg_by_ref!($T);
+    };
+
+    (@as_arg by_val $T:ty) => {
+        $crate::meta::impl_asarg_by_value!($T);
+    };
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -97,14 +130,13 @@ macro_rules! impl_ffi_variant {
 #[allow(clippy::module_inception)]
 mod impls {
     use super::*;
+    
+    // IMPORTANT: the presence/absence of `ref` here should be aligned with the ArgPassing variant
+    // used in codegen get_builtin_arg_passing().
 
-    // Also implements ArrayType.
     impl_ffi_variant!(bool, bool_to_variant, bool_from_variant);
     impl_ffi_variant!(i64, int_to_variant, int_from_variant; int);
     impl_ffi_variant!(f64, float_to_variant, float_from_variant; float);
-    impl_ffi_variant!(Aabb, aabb_to_variant, aabb_from_variant; AABB);
-    impl_ffi_variant!(Basis, basis_to_variant, basis_from_variant);
-    impl_ffi_variant!(Callable, callable_to_variant, callable_from_variant);
     impl_ffi_variant!(Vector2, vector2_to_variant, vector2_from_variant);
     impl_ffi_variant!(Vector3, vector3_to_variant, vector3_from_variant);
     impl_ffi_variant!(Vector4, vector4_to_variant, vector4_from_variant);
@@ -112,31 +144,33 @@ mod impls {
     impl_ffi_variant!(Vector3i, vector3i_to_variant, vector3i_from_variant);
     impl_ffi_variant!(Vector4i, vector4i_to_variant, vector4i_from_variant);
     impl_ffi_variant!(Quaternion, quaternion_to_variant, quaternion_from_variant);
-    impl_ffi_variant!(Color, color_to_variant, color_from_variant);
-    impl_ffi_variant!(GString, string_to_variant, string_from_variant; String);
-    impl_ffi_variant!(StringName, string_name_to_variant, string_name_from_variant);
-    impl_ffi_variant!(NodePath, node_path_to_variant, node_path_from_variant);
-    impl_ffi_variant!(PackedByteArray, packed_byte_array_to_variant, packed_byte_array_from_variant);
-    impl_ffi_variant!(PackedInt32Array, packed_int32_array_to_variant, packed_int32_array_from_variant);
-    impl_ffi_variant!(PackedInt64Array, packed_int64_array_to_variant, packed_int64_array_from_variant);
-    impl_ffi_variant!(PackedFloat32Array, packed_float32_array_to_variant, packed_float32_array_from_variant);
-    impl_ffi_variant!(PackedFloat64Array, packed_float64_array_to_variant, packed_float64_array_from_variant);
-    impl_ffi_variant!(PackedStringArray, packed_string_array_to_variant, packed_string_array_from_variant);
-    impl_ffi_variant!(PackedVector2Array, packed_vector2_array_to_variant, packed_vector2_array_from_variant);
-    impl_ffi_variant!(PackedVector3Array, packed_vector3_array_to_variant, packed_vector3_array_from_variant);
-    #[cfg(since_api = "4.3")]
-    impl_ffi_variant!(PackedVector4Array, packed_vector4_array_to_variant, packed_vector4_array_from_variant);
-    impl_ffi_variant!(PackedColorArray, packed_color_array_to_variant, packed_color_array_from_variant);
-    impl_ffi_variant!(Plane, plane_to_variant, plane_from_variant);
-    impl_ffi_variant!(Projection, projection_to_variant, projection_from_variant);
-    impl_ffi_variant!(Rid, rid_to_variant, rid_from_variant; RID);
-    impl_ffi_variant!(Rect2, rect2_to_variant, rect2_from_variant);
-    impl_ffi_variant!(Rect2i, rect2i_to_variant, rect2i_from_variant);
-    impl_ffi_variant!(Signal, signal_to_variant, signal_from_variant);
     impl_ffi_variant!(Transform2D, transform_2d_to_variant, transform_2d_from_variant);
     impl_ffi_variant!(Transform3D, transform_3d_to_variant, transform_3d_from_variant);
-    impl_ffi_variant!(Dictionary, dictionary_to_variant, dictionary_from_variant);
-
+    impl_ffi_variant!(Basis, basis_to_variant, basis_from_variant);
+    impl_ffi_variant!(Projection, projection_to_variant, projection_from_variant);
+    impl_ffi_variant!(Plane, plane_to_variant, plane_from_variant);
+    impl_ffi_variant!(Rect2, rect2_to_variant, rect2_from_variant);
+    impl_ffi_variant!(Rect2i, rect2i_to_variant, rect2i_from_variant);
+    impl_ffi_variant!(Aabb, aabb_to_variant, aabb_from_variant; AABB);
+    impl_ffi_variant!(Color, color_to_variant, color_from_variant);
+    impl_ffi_variant!(Rid, rid_to_variant, rid_from_variant; RID);
+    impl_ffi_variant!(ref GString, string_to_variant, string_from_variant; String);
+    impl_ffi_variant!(ref StringName, string_name_to_variant, string_name_from_variant);
+    impl_ffi_variant!(ref NodePath, node_path_to_variant, node_path_from_variant);
+    impl_ffi_variant!(ref Dictionary, dictionary_to_variant, dictionary_from_variant);
+    impl_ffi_variant!(ref PackedByteArray, packed_byte_array_to_variant, packed_byte_array_from_variant);
+    impl_ffi_variant!(ref PackedInt32Array, packed_int32_array_to_variant, packed_int32_array_from_variant);
+    impl_ffi_variant!(ref PackedInt64Array, packed_int64_array_to_variant, packed_int64_array_from_variant);
+    impl_ffi_variant!(ref PackedFloat32Array, packed_float32_array_to_variant, packed_float32_array_from_variant);
+    impl_ffi_variant!(ref PackedFloat64Array, packed_float64_array_to_variant, packed_float64_array_from_variant);
+    impl_ffi_variant!(ref PackedStringArray, packed_string_array_to_variant, packed_string_array_from_variant);
+    impl_ffi_variant!(ref PackedVector2Array, packed_vector2_array_to_variant, packed_vector2_array_from_variant);
+    impl_ffi_variant!(ref PackedVector3Array, packed_vector3_array_to_variant, packed_vector3_array_from_variant);
+    #[cfg(since_api = "4.3")]
+    impl_ffi_variant!(ref PackedVector4Array, packed_vector4_array_to_variant, packed_vector4_array_from_variant);
+    impl_ffi_variant!(ref PackedColorArray, packed_color_array_to_variant, packed_color_array_from_variant);
+    impl_ffi_variant!(ref Signal, signal_to_variant, signal_from_variant);
+    impl_ffi_variant!(ref Callable, callable_to_variant, callable_from_variant);
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -162,9 +196,10 @@ impl GodotFfiVariant for () {
 }
 
 impl GodotType for () {
-    type Ffi = Self;
+    type Ffi = ();
+    type ToFfi<'a> = ();
 
-    fn to_ffi(&self) -> Self::Ffi {}
+    fn to_ffi(&self) -> Self::ToFfi<'_> {}
 
     fn into_ffi(self) -> Self::Ffi {}
 
@@ -173,7 +208,7 @@ impl GodotType for () {
     }
 
     fn godot_type_name() -> String {
-        "Variant".into()
+        "Variant".to_string()
     }
 }
 
@@ -189,9 +224,10 @@ impl GodotFfiVariant for Variant {
 
 impl GodotType for Variant {
     type Ffi = Variant;
+    type ToFfi<'a> = RefArg<'a, Variant>;
 
-    fn to_ffi(&self) -> Self::Ffi {
-        self.clone()
+    fn to_ffi(&self) -> Self::ToFfi<'_> {
+        RefArg::new(self)
     }
 
     fn into_ffi(self) -> Self::Ffi {
@@ -217,6 +253,6 @@ impl GodotType for Variant {
     }
 
     fn godot_type_name() -> String {
-        "Variant".into()
+        "Variant".to_string()
     }
 }
