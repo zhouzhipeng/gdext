@@ -358,23 +358,23 @@ impl FromGodot for u64 {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Collections
 
-impl<T: ArrayElement> GodotConvert for Vec<T> {
-    type Via = Array<T>;
-}
-
-impl<T: ArrayElement> ToGodot for Vec<T> {
-    type ToVia<'v> = Array<T>;
-
-    fn to_godot(&self) -> Self::ToVia<'_> {
-        Array::from(self.as_slice())
-    }
-}
-
-impl<T: ArrayElement> FromGodot for Vec<T> {
-    fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
-        Ok(via.iter_shared().collect())
-    }
-}
+// impl<T: ArrayElement> GodotConvert for Vec<T> {
+//     type Via = Array<T>;
+// }
+//
+// impl<T: ArrayElement> ToGodot for Vec<T> {
+//     type ToVia<'v> = Array<T>;
+//
+//     fn to_godot(&self) -> Self::ToVia<'_> {
+//         Array::from(self.as_slice())
+//     }
+// }
+//
+// impl<T: ArrayElement> FromGodot for Vec<T> {
+//     fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
+//         Ok(via.iter_shared().collect())
+//     }
+// }
 
 impl<T: ArrayElement, const LEN: usize> GodotConvert for [T; LEN] {
     type Via = Array<T>;

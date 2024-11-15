@@ -246,37 +246,37 @@ fn custom_convert_error_from_variant() {
     );
 }
 
-#[itest]
-fn vec_to_array() {
-    let from = vec![1, 2, 3];
-    let to = from.to_variant().to::<Array<i32>>();
-    assert_eq!(to, array![1, 2, 3]);
+// #[itest]
+// fn vec_to_array() {
+//     let from = vec![1, 2, 3];
+//     let to = from.to_variant().to::<Array<i32>>();
+//     assert_eq!(to, array![1, 2, 3]);
+//
+//     let from = vec![GString::from("Hello"), GString::from("World")];
+//     let to = from.to_variant().to::<Array<GString>>();
+//     assert_eq!(to, array!["Hello", "World"]);
+//
+//     // Invalid conversion.
+//     let from = vec![1, 2, 3];
+//     let to = from.to_variant().try_to::<Array<f32>>();
+//     assert!(to.is_err());
+// }
 
-    let from = vec![GString::from("Hello"), GString::from("World")];
-    let to = from.to_variant().to::<Array<GString>>();
-    assert_eq!(to, array!["Hello", "World"]);
-
-    // Invalid conversion.
-    let from = vec![1, 2, 3];
-    let to = from.to_variant().try_to::<Array<f32>>();
-    assert!(to.is_err());
-}
-
-#[itest]
-fn array_to_vec() {
-    let from = array![1, 2, 3];
-    let to = from.to_variant().to::<Vec<i32>>();
-    assert_eq!(to, vec![1, 2, 3]);
-
-    let from: Array<GString> = array!["Hello", "World"];
-    let to = from.to_variant().to::<Vec<GString>>();
-    assert_eq!(to, vec![GString::from("Hello"), GString::from("World")]);
-
-    // Invalid conversion.
-    let from = array![1, 2, 3];
-    let to = from.to_variant().try_to::<Vec<f32>>();
-    assert!(to.is_err());
-}
+// #[itest]
+// fn array_to_vec() {
+//     let from = array![1, 2, 3];
+//     let to = from.to_variant().to::<Vec<i32>>();
+//     assert_eq!(to, vec![1, 2, 3]);
+//
+//     let from: Array<GString> = array!["Hello", "World"];
+//     let to = from.to_variant().to::<Vec<GString>>();
+//     assert_eq!(to, vec![GString::from("Hello"), GString::from("World")]);
+//
+//     // Invalid conversion.
+//     // let from = array![1, 2, 3];
+//     // let to = from.to_variant().try_to::<Vec<f32>>();
+//     // assert!(to.is_err());
+// }
 
 #[itest]
 fn rust_array_to_array() {
