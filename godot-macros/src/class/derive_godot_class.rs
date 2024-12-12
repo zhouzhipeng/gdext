@@ -540,8 +540,12 @@ fn parse_fields(
 			        );
                 }
 
-                field.default_val = Some(quote! {
+
+                field.default_val = Some(FieldDefault {
+                    default_val: quote! {
                     OnReady::id(#node_path)
+                },
+                    span: parser.span(),
                 });
             }
 
