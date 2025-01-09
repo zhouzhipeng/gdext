@@ -14,6 +14,8 @@ use std::num::NonZeroU64;
 ///
 /// This is its own type for type safety and to deal with the inconsistent representation in Godot as both `u64` (C++) and `i64` (GDScript).
 /// You can usually treat this as an opaque value and pass it to and from GDScript; there are conversion methods however.
+///
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct InstanceId {
