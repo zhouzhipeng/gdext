@@ -8,8 +8,11 @@
 //! Runtime checks and inspection of Godot classes.
 
 use crate::builtin::{GString, StringName};
+#[cfg(debug_assertions)]
 use crate::classes::{ClassDb, Object};
-use crate::meta::{CallContext, ClassName};
+use crate::meta::CallContext;
+#[cfg(debug_assertions)]
+use crate::meta::ClassName;
 use crate::obj::{bounds, Bounds, Gd, GodotClass, InstanceId};
 use crate::sys;
 
@@ -44,7 +47,7 @@ pub(crate) fn display_string<T: GodotClass>(
     obj: &Gd<T>,
     f: &mut std::fmt::Formatter<'_>,
 ) -> std::fmt::Result {
-    let string: GString = obj.raw.as_object().to_string();
+    let string: GString = obj.raw.as_object_ref().to_string();
     <GString as std::fmt::Display>::fmt(&string, f)
 }
 

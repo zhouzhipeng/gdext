@@ -5,6 +5,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+// Needed for Clippy to accept #[cfg(all())]
+#![allow(clippy::non_minimal_cfg)]
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -23,7 +26,7 @@ use godot::sys::{self, interface_fn, GodotFfi};
 use crate::framework::{expect_panic, itest, TestContext};
 
 // TODO:
-// * make sure that ptrcalls are used when possible (ie. when type info available; maybe GDScript integration test)
+// * make sure that ptrcalls are used when possible (i.e. when type info available; maybe GDScript integration test)
 // * Deref impl for user-defined types
 
 #[itest]
@@ -533,6 +536,27 @@ fn object_engine_convert_variant_error() {
 }
 
 #[itest]
+fn object_convert_variant_option() {
+    let refc = RefCounted::new_gd();
+    let variant = refc.to_variant();
+
+    // Variant -> Option<Gd>.
+    let gd = Option::<Gd<RefCounted>>::from_variant(&variant);
+    assert_eq!(gd, Some(refc.clone()));
+
+    let nil = Variant::nil();
+    let gd = Option::<Gd<RefCounted>>::from_variant(&nil);
+    assert_eq!(gd, None);
+
+    // Option<Gd> -> Variant.
+    let back = Some(refc).to_variant();
+    assert_eq!(back, variant);
+
+    let back = None::<Gd<RefCounted>>.to_variant();
+    assert_eq!(back, Variant::nil());
+}
+
+#[itest]
 fn object_engine_returned_refcount() {
     let Some(file) = FileAccess::open("res://itest.gdextension", file_access::ModeFlags::READ)
     else {
@@ -889,7 +913,7 @@ pub(super) struct ObjPayload {}
 
 #[godot_api]
 impl ObjPayload {
-    #[signal]
+    #[signal(__no_builder)]
     fn do_use();
 
     #[func]
@@ -1090,3 +1114,21 @@ fn double_use_reference() {
     double_use.free();
     emitter.free();
 }
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+// Test that one class can be declared multiple times (using #[cfg]) without conflicts
+
+#[derive(GodotClass)]
+#[class(init, base=Object)]
+struct MultipleStructsCfg {}
+
+#[derive(GodotClass)]
+#[class(init, base=Object)]
+#[cfg(any())]
+struct MultipleStructsCfg {}
+
+#[cfg(any())]
+#[derive(GodotClass)]
+#[class(init, base=Object)]
+struct MultipleStructsCfg {}

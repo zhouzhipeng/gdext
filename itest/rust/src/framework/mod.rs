@@ -122,6 +122,9 @@ pub fn passes_filter(filters: &[String], test_name: &str) -> bool {
     filters.is_empty() || filters.iter().any(|x| test_name.contains(x))
 }
 
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Toolbox for tests
+
 pub fn expect_panic(context: &str, code: impl FnOnce()) {
     use std::panic;
 
@@ -142,6 +145,14 @@ pub fn expect_panic(context: &str, code: impl FnOnce()) {
         panic.is_err(),
         "code should have panicked but did not: {context}",
     );
+}
+
+pub fn expect_debug_panic_or_release_ok(_context: &str, code: impl FnOnce()) {
+    #[cfg(debug_assertions)]
+    expect_panic(_context, code);
+
+    #[cfg(not(debug_assertions))]
+    code()
 }
 
 /// Synchronously run a thread and return result. Panics are propagated to caller thread.

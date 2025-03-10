@@ -12,13 +12,26 @@
 
 use crate::builder::ClassBuilder;
 use crate::builtin::{StringName, Variant};
-use crate::obj::{cap, Base, GodotClass, UserClass};
+use crate::classes::Object;
+use crate::meta::PropertyInfo;
+use crate::obj::{bounds, cap, AsDyn, Base, Bounds, Gd, GodotClass, Inherits, UserClass};
+use crate::registry::plugin::ErasedDynGd;
 use crate::storage::{as_storage, InstanceStorage, Storage, StorageRefCounted};
 use godot_ffi as sys;
 use std::any::Any;
 use sys::conv::u32_to_usize;
 use sys::interface_fn;
 
+// Creation callback has `p_notify_postinitialize` parameter since 4.4: https://github.com/godotengine/godot/pull/91018.
+#[cfg(since_api = "4.4")]
+pub unsafe extern "C" fn create<T: cap::GodotDefault>(
+    _class_userdata: *mut std::ffi::c_void,
+    _notify_postinitialize: sys::GDExtensionBool,
+) -> sys::GDExtensionObjectPtr {
+    create_custom(T::__godot_user_init)
+}
+
+#[cfg(before_api = "4.4")]
 pub unsafe extern "C" fn create<T: cap::GodotDefault>(
     _class_userdata: *mut std::ffi::c_void,
 ) -> sys::GDExtensionObjectPtr {
@@ -99,6 +112,20 @@ pub unsafe extern "C" fn free<T: GodotClass>(
     crate::storage::destroy_storage::<T>(instance);
 }
 
+#[cfg(since_api = "4.4")]
+pub unsafe extern "C" fn get_virtual<T: cap::ImplementsGodotVirtual>(
+    _class_user_data: *mut std::ffi::c_void,
+    name: sys::GDExtensionConstStringNamePtr,
+    hash: u32,
+) -> sys::GDExtensionClassCallVirtual {
+    // This string is not ours, so we cannot call the destructor on it.
+    let borrowed_string = StringName::borrow_string_sys(name);
+    let method_name = borrowed_string.to_string();
+
+    T::__virtual_call(method_name.as_str(), hash)
+}
+
+#[cfg(before_api = "4.4")]
 pub unsafe extern "C" fn get_virtual<T: cap::ImplementsGodotVirtual>(
     _class_user_data: *mut std::ffi::c_void,
     name: sys::GDExtensionConstStringNamePtr,
@@ -110,6 +137,20 @@ pub unsafe extern "C" fn get_virtual<T: cap::ImplementsGodotVirtual>(
     T::__virtual_call(method_name.as_str())
 }
 
+#[cfg(since_api = "4.4")]
+pub unsafe extern "C" fn default_get_virtual<T: UserClass>(
+    _class_user_data: *mut std::ffi::c_void,
+    name: sys::GDExtensionConstStringNamePtr,
+    hash: u32,
+) -> sys::GDExtensionClassCallVirtual {
+    // This string is not ours, so we cannot call the destructor on it.
+    let borrowed_string = StringName::borrow_string_sys(name);
+    let method_name = borrowed_string.to_string();
+
+    T::__default_virtual_call(method_name.as_str(), hash)
+}
+
+#[cfg(before_api = "4.4")]
 pub unsafe extern "C" fn default_get_virtual<T: UserClass>(
     _class_user_data: *mut std::ffi::c_void,
     name: sys::GDExtensionConstStringNamePtr,
@@ -317,6 +358,35 @@ pub unsafe extern "C" fn property_get_revert<T: cap::GodotPropertyGetRevert>(
 
     sys::conv::SYS_TRUE
 }
+
+/// Callback for `validate_property`.
+///
+/// Exposes `PropertyInfo` created out of `*mut GDExtensionPropertyInfo` ptr to user and moves edited values back to the pointer.
+///
+/// # Safety
+///
+/// - Must only be called by Godot as a callback for `validate_property` for a rust-defined class of type `T`.
+/// - `property_info_ptr` must be valid for the whole duration of this function call (i.e. - can't be freed nor consumed).
+///
+#[deny(unsafe_op_in_unsafe_fn)]
+#[cfg(since_api = "4.2")]
+pub unsafe extern "C" fn validate_property<T: cap::GodotValidateProperty>(
+    instance: sys::GDExtensionClassInstancePtr,
+    property_info_ptr: *mut sys::GDExtensionPropertyInfo,
+) -> sys::GDExtensionBool {
+    // SAFETY: `instance` is a valid `T` instance pointer for the duration of this function call.
+    let storage = unsafe { as_storage::<T>(instance) };
+    let instance = storage.get();
+
+    // SAFETY: property_info_ptr must be valid.
+    let mut property_info = unsafe { PropertyInfo::new_from_sys(property_info_ptr) };
+    T::__godot_validate_property(&*instance, &mut property_info);
+
+    // SAFETY: property_info_ptr remains valid & unchanged.
+    unsafe { property_info.move_into_property_info_ptr(property_info_ptr) };
+
+    sys::conv::SYS_TRUE
+}
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Safe, higher-level methods
 
@@ -357,4 +427,23 @@ pub fn register_user_methods_constants<T: cap::ImplementsGodotApi>(_class_builde
 
 pub fn register_user_rpcs<T: cap::ImplementsGodotApi>(object: &mut dyn Any) {
     T::__register_rpcs(object);
+}
+
+/// # Safety
+///
+/// `obj` must be castable to `T`.
+#[deny(unsafe_op_in_unsafe_fn)]
+pub unsafe fn dynify_fn<T, D>(obj: Gd<Object>) -> ErasedDynGd
+where
+    T: GodotClass + Inherits<Object> + AsDyn<D> + Bounds<Declarer = bounds::DeclUser>,
+    D: ?Sized + 'static,
+{
+    // SAFETY: `obj` is castable to `T`.
+    let obj = unsafe { obj.try_cast::<T>().unwrap_unchecked() };
+    let obj = obj.into_dyn::<D>();
+    let obj = obj.upcast::<Object>();
+
+    ErasedDynGd {
+        boxed: Box::new(obj),
+    }
 }

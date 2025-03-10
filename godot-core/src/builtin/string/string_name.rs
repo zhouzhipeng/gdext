@@ -4,14 +4,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-
 use std::fmt;
 
 use godot_ffi as sys;
+use godot_ffi::interface_fn;
 use sys::{ffi_methods, GodotFfi};
 
-use crate::builtin::inner;
-use crate::builtin::{GString, NodePath};
+use crate::builtin::{inner, Encoding, GString, NodePath, Variant};
+use crate::meta::error::StringError;
+use crate::meta::AsArg;
+use crate::{impl_shared_string_api, meta};
 
 /// A string optimized for unique names.
 ///
@@ -44,6 +46,10 @@ use crate::builtin::{GString, NodePath};
 /// | General purpose   | [`GString`][crate::builtin::GString]       |
 /// | Interned names    | **`StringName`**                           |
 /// | Scene-node paths  | [`NodePath`][crate::builtin::NodePath]     |
+///
+/// # Godot docs
+///
+/// [`StringName` (stable)](https://docs.godotengine.org/en/stable/classes/class_stringname.html)
 // Currently we rely on `transparent` for `borrow_string_sys`.
 #[repr(transparent)]
 pub struct StringName {
@@ -55,19 +61,89 @@ impl StringName {
         Self { opaque }
     }
 
-    /// Returns the number of characters in the string.
+    /// Convert string from bytes with given encoding, returning `Err` on validation errors.
+    ///
+    /// Intermediate `NUL` characters are not accepted in Godot and always return `Err`.
+    ///
+    /// Some notes on the encodings:
+    /// - **Latin-1:** Since every byte is a valid Latin-1 character, no validation besides the `NUL` byte is performed.
+    ///   It is your responsibility to ensure that the input is valid Latin-1.
+    /// - **ASCII**: Subset of Latin-1, which is additionally validated to be valid, non-`NUL` ASCII characters.
+    /// - **UTF-8**: The input is validated to be UTF-8.
+    ///
+    /// Specifying incorrect encoding is safe, but may result in unintended string values.
+    pub fn try_from_bytes(bytes: &[u8], encoding: Encoding) -> Result<Self, StringError> {
+        Self::try_from_bytes_with_nul_check(bytes, encoding, true)
+    }
+
+    /// Convert string from bytes with given encoding, returning `Err` on validation errors.
+    ///
+    /// Convenience function for [`try_from_bytes()`](Self::try_from_bytes); see its docs for more information.
+    ///
+    /// When called with `Encoding::Latin1`, this can be slightly more efficient than `try_from_bytes()`.
+    pub fn try_from_cstr(cstr: &std::ffi::CStr, encoding: Encoding) -> Result<Self, StringError> {
+        // Short-circuit the direct Godot 4.2 function for Latin-1, which takes a null-terminated C string.
+        #[cfg(since_api = "4.2")]
+        if encoding == Encoding::Latin1 {
+            // Note: CStr guarantees no intermediate NUL bytes, so we don't need to check for them.
+
+            let is_static = sys::conv::SYS_FALSE;
+            let s = unsafe {
+                Self::new_with_string_uninit(|string_ptr| {
+                    let ctor = interface_fn!(string_name_new_with_latin1_chars);
+                    ctor(
+                        string_ptr,
+                        cstr.as_ptr() as *const std::ffi::c_char,
+                        is_static,
+                    );
+                })
+            };
+            return Ok(s);
+        }
+
+        Self::try_from_bytes_with_nul_check(cstr.to_bytes(), encoding, false)
+    }
+
+    fn try_from_bytes_with_nul_check(
+        bytes: &[u8],
+        encoding: Encoding,
+        check_nul: bool,
+    ) -> Result<Self, StringError> {
+        match encoding {
+            Encoding::Ascii => {
+                // ASCII is a subset of UTF-8, and UTF-8 has a more direct implementation than Latin-1; thus use UTF-8 via `From<&str>`.
+                if !bytes.is_ascii() {
+                    Err(StringError::new("invalid ASCII"))
+                } else if check_nul && bytes.contains(&0) {
+                    Err(StringError::new("intermediate NUL byte in ASCII string"))
+                } else {
+                    // SAFETY: ASCII is a subset of UTF-8 and was verified above.
+                    let ascii = unsafe { std::str::from_utf8_unchecked(bytes) };
+                    Ok(Self::from(ascii))
+                }
+            }
+            Encoding::Latin1 => {
+                // This branch is short-circuited if invoked for CStr and Godot 4.2+, which uses `string_name_new_with_latin1_chars`
+                // (requires nul-termination). In general, fall back to GString conversion.
+                GString::try_from_bytes_with_nul_check(bytes, Encoding::Latin1, check_nul)
+                    .map(Self::from)
+            }
+            Encoding::Utf8 => {
+                // from_utf8() also checks for intermediate NUL bytes.
+                let utf8 = std::str::from_utf8(bytes);
+
+                utf8.map(StringName::from)
+                    .map_err(|e| StringError::with_source("invalid UTF-8", e))
+            }
+        }
+    }
+
+    /// Number of characters in the string.
     ///
     /// _Godot equivalent: `length`_
     #[doc(alias = "length")]
     pub fn len(&self) -> usize {
         self.as_inner().length() as usize
-    }
-
-    /// Returns `true` if this is the empty string.
-    ///
-    /// _Godot equivalent: `is_empty`_
-    pub fn is_empty(&self) -> bool {
-        self.as_inner().is_empty()
     }
 
     /// Returns a 32-bit integer hash value representing the string.
@@ -78,7 +154,7 @@ impl StringName {
             .expect("Godot hashes are uint32_t")
     }
 
-    crate::meta::declare_arg_method! {
+    meta::declare_arg_method! {
         /// Use as argument for an [`impl AsArg<GString|NodePath>`][crate::meta::AsArg] parameter.
         ///
         /// This is a convenient way to convert arguments of similar string types.
@@ -157,6 +233,19 @@ impl StringName {
         &*(ptr.cast::<StringName>())
     }
 
+    /// Convert a `StringName` sys pointer to a mutable reference with unbounded lifetime.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must point to a live `StringName` for the duration of `'a`.
+    /// - Must be exclusive - no other reference to given `StringName` instance can exist for the duration of `'a`.
+    pub(crate) unsafe fn borrow_string_sys_mut<'a>(
+        ptr: sys::GDExtensionStringNamePtr,
+    ) -> &'a mut StringName {
+        sys::static_assert_eq_size_align!(StringName, sys::types::OpaqueStringName);
+        &mut *(ptr.cast::<StringName>())
+    }
+
     #[doc(hidden)]
     pub fn as_inner(&self) -> inner::InnerStringName {
         inner::InnerStringName::from_outer(self)
@@ -186,7 +275,7 @@ unsafe impl GodotFfi for StringName {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
 }
 
-crate::meta::impl_godot_as_self!(StringName);
+meta::impl_godot_as_self!(StringName);
 
 impl_builtin_traits! {
     for StringName {
@@ -198,6 +287,12 @@ impl_builtin_traits! {
         // (based on pointers). See transient_ord() method.
         Hash;
     }
+}
+
+impl_shared_string_api! {
+    builtin: StringName,
+    find_builder: ExStringNameFind,
+    split_builder: ExStringNameSplit,
 }
 
 impl fmt::Display for StringName {
@@ -358,7 +453,6 @@ impl PartialOrd for TransientStringNameOrd<'_> {
     }
 }
 
-// implement Ord like above
 impl Ord for TransientStringNameOrd<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // SAFETY: builtin operator provided by Godot.

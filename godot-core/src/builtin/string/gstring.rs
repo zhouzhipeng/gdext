@@ -5,14 +5,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::convert::Infallible;
+use std::fmt;
 use std::fmt::Write;
-use std::{convert::Infallible, ffi::c_char, fmt, str::FromStr};
 
 use godot_ffi as sys;
 use sys::types::OpaqueString;
 use sys::{ffi_methods, interface_fn, GodotFfi};
 
-use crate::builtin::{inner, NodePath, StringName};
+use crate::builtin::string::Encoding;
+use crate::builtin::{inner, NodePath, StringName, Variant};
+use crate::meta::error::StringError;
+use crate::meta::AsArg;
+use crate::{impl_shared_string_api, meta};
 
 /// Godot's reference counted string type.
 ///
@@ -56,6 +61,10 @@ use crate::builtin::{inner, NodePath, StringName};
 /// | General purpose   | **`GString`**                              |
 /// | Interned names    | [`StringName`][crate::builtin::StringName] |
 /// | Scene-node paths  | [`NodePath`][crate::builtin::NodePath]     |
+///
+/// # Godot docs
+///
+/// [`String` (stable)](https://docs.godotengine.org/en/stable/classes/class_string.html)
 #[doc(alias = "String")]
 // #[repr] is needed on GString itself rather than the opaque field, because PackedStringArray::as_slice() relies on a packed representation.
 #[repr(transparent)]
@@ -64,17 +73,84 @@ pub struct GString {
 }
 
 impl GString {
-    /// Construct a new empty GString.
+    /// Construct a new empty `GString`.
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
-        self.as_inner().length().try_into().unwrap()
+    /// Convert string from bytes with given encoding, returning `Err` on validation errors.
+    ///
+    /// Intermediate `NUL` characters are not accepted in Godot and always return `Err`.
+    ///
+    /// Some notes on the encodings:
+    /// - **Latin-1:** Since every byte is a valid Latin-1 character, no validation besides the `NUL` byte is performed.
+    ///   It is your responsibility to ensure that the input is valid Latin-1.
+    /// - **ASCII**: Subset of Latin-1, which is additionally validated to be valid, non-`NUL` ASCII characters.
+    /// - **UTF-8**: The input is validated to be UTF-8.
+    ///
+    /// Specifying incorrect encoding is safe, but may result in unintended string values.
+    pub fn try_from_bytes(bytes: &[u8], encoding: Encoding) -> Result<Self, StringError> {
+        Self::try_from_bytes_with_nul_check(bytes, encoding, true)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.as_inner().is_empty()
+    /// Convert string from C-string with given encoding, returning `Err` on validation errors.
+    ///
+    /// Convenience function for [`try_from_bytes()`](Self::try_from_bytes); see its docs for more information.
+    pub fn try_from_cstr(cstr: &std::ffi::CStr, encoding: Encoding) -> Result<Self, StringError> {
+        Self::try_from_bytes_with_nul_check(cstr.to_bytes(), encoding, false)
+    }
+
+    pub(super) fn try_from_bytes_with_nul_check(
+        bytes: &[u8],
+        encoding: Encoding,
+        check_nul: bool,
+    ) -> Result<Self, StringError> {
+        match encoding {
+            Encoding::Ascii => {
+                // If the bytes are ASCII, we can fall back to Latin-1, which is always valid (except for NUL).
+                // is_ascii() does *not* check for the NUL byte, so the check in the Latin-1 branch is still necessary.
+                if bytes.is_ascii() {
+                    Self::try_from_bytes_with_nul_check(bytes, Encoding::Latin1, check_nul)
+                        .map_err(|_e| StringError::new("intermediate NUL byte in ASCII string"))
+                } else {
+                    Err(StringError::new("invalid ASCII"))
+                }
+            }
+            Encoding::Latin1 => {
+                // Intermediate NUL bytes are not accepted in Godot. Both ASCII + Latin-1 encodings need to explicitly check for this.
+                if check_nul && bytes.contains(&0) {
+                    // Error overwritten when called from ASCII branch.
+                    return Err(StringError::new("intermediate NUL byte in Latin-1 string"));
+                }
+
+                let s = unsafe {
+                    Self::new_with_string_uninit(|string_ptr| {
+                        let ctor = interface_fn!(string_new_with_latin1_chars_and_len);
+                        ctor(
+                            string_ptr,
+                            bytes.as_ptr() as *const std::ffi::c_char,
+                            bytes.len() as i64,
+                        );
+                    })
+                };
+                Ok(s)
+            }
+            Encoding::Utf8 => {
+                // from_utf8() also checks for intermediate NUL bytes.
+                let utf8 = std::str::from_utf8(bytes);
+
+                utf8.map(GString::from)
+                    .map_err(|e| StringError::with_source("invalid UTF-8", e))
+            }
+        }
+    }
+
+    /// Number of characters in the string.
+    ///
+    /// _Godot equivalent: `length`_
+    #[doc(alias = "length")]
+    pub fn len(&self) -> usize {
+        self.as_inner().length().try_into().unwrap()
     }
 
     /// Returns a 32-bit integer hash value representing the string.
@@ -85,7 +161,7 @@ impl GString {
             .expect("Godot hashes are uint32_t")
     }
 
-    /// Gets the UTF-32 character slice from a [`GString`].
+    /// Gets the UTF-32 character slice from a `GString`.
     pub fn chars(&self) -> &[char] {
         // SAFETY: Godot 4.1 ensures valid UTF-32, making interpreting as char slice safe.
         // See https://github.com/godotengine/godot/pull/74760.
@@ -94,7 +170,7 @@ impl GString {
             let len = interface_fn!(string_to_utf32_chars)(s, std::ptr::null_mut(), 0);
             let ptr = interface_fn!(string_operator_index_const)(s, 0);
 
-            // Even when len == 0, from_raw_parts requires ptr != 0
+            // Even when len == 0, from_raw_parts requires ptr != null.
             if ptr.is_null() {
                 return &[];
             }
@@ -140,6 +216,17 @@ impl GString {
         *boxed
     }
 
+    /// Convert a `GString` sys pointer to a mutable reference with unbounded lifetime.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must point to a live `GString` for the duration of `'a`.
+    /// - Must be exclusive - no other reference to given `GString` instance can exist for the duration of `'a`.
+    pub(crate) unsafe fn borrow_string_sys_mut<'a>(ptr: sys::GDExtensionStringPtr) -> &'a mut Self {
+        sys::static_assert_eq_size_align!(StringName, sys::types::OpaqueString);
+        &mut *(ptr.cast::<GString>())
+    }
+
     /// Moves this string into a string sys pointer. This is the same as using [`GodotFfi::move_return_ptr`].
     ///
     /// # Safety
@@ -151,7 +238,7 @@ impl GString {
         self.move_return_ptr(dst, sys::PtrcallType::Standard);
     }
 
-    crate::meta::declare_arg_method! {
+    meta::declare_arg_method! {
         /// Use as argument for an [`impl AsArg<StringName|NodePath>`][crate::meta::AsArg] parameter.
         ///
         /// This is a convenient way to convert arguments of similar string types.
@@ -192,7 +279,7 @@ unsafe impl GodotFfi for GString {
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(GString);
+meta::impl_godot_as_self!(GString);
 
 impl_builtin_traits! {
     for GString {
@@ -203,6 +290,12 @@ impl_builtin_traits! {
         Ord => string_operator_less;
         Hash;
     }
+}
+
+impl_shared_string_api! {
+    builtin: GString,
+    find_builder: ExGStringFind,
+    split_builder: ExGStringSplit,
 }
 
 impl fmt::Display for GString {
@@ -235,7 +328,7 @@ impl From<&str> for GString {
                 let ctor = interface_fn!(string_new_with_utf8_chars_and_len);
                 ctor(
                     string_ptr,
-                    bytes.as_ptr() as *const c_char,
+                    bytes.as_ptr() as *const std::ffi::c_char,
                     bytes.len() as i64,
                 );
             })
@@ -282,7 +375,7 @@ impl From<&GString> for String {
 
             interface_fn!(string_to_utf8_chars)(
                 string.string_sys(),
-                buf.as_mut_ptr() as *mut c_char,
+                buf.as_mut_ptr() as *mut std::ffi::c_char,
                 len,
             );
 
@@ -301,7 +394,7 @@ impl From<GString> for String {
     }
 }
 
-impl FromStr for GString {
+impl std::str::FromStr for GString {
     type Err = Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {

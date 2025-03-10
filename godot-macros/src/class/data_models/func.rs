@@ -31,17 +31,33 @@ pub struct FuncDefinition {
     pub rpc_info: Option<RpcAttr>,
 }
 
+impl FuncDefinition {
+    pub fn rust_ident(&self) -> &Ident {
+        &self.signature_info.method_name
+    }
+
+    pub fn godot_name(&self) -> String {
+        if let Some(name_override) = self.registered_name.as_ref() {
+            name_override.clone()
+        } else {
+            self.rust_ident().to_string()
+        }
+    }
+}
+
 /// Returns a C function which acts as the callback when a virtual method of this instance is invoked.
 //
 // Virtual methods are non-static by their nature; so there's no support for static ones.
 pub fn make_virtual_callback(
     class_name: &Ident,
-    signature_info: SignatureInfo,
+    signature_info: &SignatureInfo,
     before_kind: BeforeKind,
+    interface_trait: Option<&venial::TypeExpr>,
 ) -> TokenStream {
     let method_name = &signature_info.method_name;
 
-    let wrapped_method = make_forwarding_closure(class_name, &signature_info, before_kind);
+    let wrapped_method =
+        make_forwarding_closure(class_name, signature_info, before_kind, interface_trait);
     let sig_tuple = signature_info.tuple_type();
 
     let call_ctx = make_call_context(
@@ -75,6 +91,7 @@ pub fn make_virtual_callback(
 pub fn make_method_registration(
     class_name: &Ident,
     func_definition: FuncDefinition,
+    interface_trait: Option<&venial::TypeExpr>,
 ) -> ParseResult<TokenStream> {
     let signature_info = &func_definition.signature_info;
     let sig_tuple = signature_info.tuple_type();
@@ -85,17 +102,16 @@ pub fn make_method_registration(
         Err(msg) => return bail_fn(msg, &signature_info.method_name),
     };
 
-    let forwarding_closure =
-        make_forwarding_closure(class_name, signature_info, BeforeKind::Without);
+    let forwarding_closure = make_forwarding_closure(
+        class_name,
+        signature_info,
+        BeforeKind::Without,
+        interface_trait,
+    );
 
     // String literals
-    let method_name = &signature_info.method_name;
     let class_name_str = class_name.to_string();
-    let method_name_str = if let Some(updated_name) = func_definition.registered_name {
-        updated_name
-    } else {
-        method_name.to_string()
-    };
+    let method_name_str = func_definition.godot_name();
 
     let call_ctx = make_call_context(&class_name_str, &method_name_str);
     let varcall_fn_decl = make_varcall_fn(&call_ctx, &forwarding_closure);
@@ -186,12 +202,16 @@ impl SignatureInfo {
         }
     }
 
+    // The below functions share quite a bit of tokenization. If ever we run into codegen slowness, we could cache/reuse identical
+    // sub-expressions.
+
     pub fn tuple_type(&self) -> TokenStream {
         // Note: for GdSelf receivers, first parameter is not even part of SignatureInfo anymore.
         util::make_signature_tuple_type(&self.ret_type, &self.param_types)
     }
 }
 
+#[derive(Copy, Clone)]
 pub enum BeforeKind {
     /// Default: just call the method.
     Without,
@@ -208,6 +228,7 @@ fn make_forwarding_closure(
     class_name: &Ident,
     signature_info: &SignatureInfo,
     before_kind: BeforeKind,
+    interface_trait: Option<&venial::TypeExpr>,
 ) -> TokenStream {
     let method_name = &signature_info.method_name;
     let params = &signature_info.param_idents;
@@ -237,7 +258,21 @@ fn make_forwarding_closure(
             let method_call = if matches!(before_kind, BeforeKind::OnlyBefore) {
                 TokenStream::new()
             } else {
-                quote! { instance.#method_name( #(#params),* ) }
+                match interface_trait {
+                    // impl ITrait for Class {...}
+                    Some(interface_trait) => {
+                        let instance_ref = match signature_info.receiver_type {
+                            ReceiverType::Ref => quote! { &instance },
+                            ReceiverType::Mut => quote! { &mut instance },
+                            _ => unreachable!("unexpected receiver type"), // checked above.
+                        };
+
+                        quote! { <#class_name as #interface_trait>::#method_name( #instance_ref, #(#params),* ) }
+                    }
+
+                    // impl Class {...}
+                    None => quote! { instance.#method_name( #(#params),* ) },
+                }
             };
 
             quote! {

@@ -40,7 +40,6 @@ use crate::util::{bail, ident, KvParser};
 /// - [Properties and exports](#properties-and-exports)
 ///    - [Property registration](#property-registration)
 ///    - [Property exports](#property-exports)
-/// - [Signals](#signals)
 /// - [Further class customization](#further-class-customization)
 ///    - [Running code in the editor](#running-code-in-the-editor)
 ///    - [Editor plugins](#editor-plugins)
@@ -327,27 +326,6 @@ use crate::util::{bail, ident, KvParser};
 /// }
 /// ```
 ///
-/// # Signals
-///
-/// The `#[signal]` attribute is quite limited at the moment. The functions it decorates (the signals) can accept parameters.
-/// It will be fundamentally reworked.
-///
-/// ```no_run
-/// # use godot::prelude::*;
-/// #[derive(GodotClass)]
-/// # #[class(init)]
-/// struct MyClass {}
-///
-/// #[godot_api]
-/// impl MyClass {
-///     #[signal]
-///     fn some_signal();
-///
-///     #[signal]
-///     fn some_signal_with_parameters(my_parameter: Gd<Node>);
-/// }
-/// ```
-///
 /// # Further class customization
 ///
 /// ## Running code in the editor
@@ -529,7 +507,8 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 ///   - [Associated functions and methods](#associated-functions-and-methods)
 ///   - [Virtual methods](#virtual-methods)
 ///   - [RPC attributes](#rpc-attributes)
-/// - [Constants and signals](#signals)
+/// - [Signals](#signals)
+/// - [Constants](#constants)
 /// - [Multiple inherent `impl` blocks](#multiple-inherent-impl-blocks)
 ///
 /// # Constructors
@@ -710,10 +689,23 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 /// `#[rpc]` implies `#[func]`. You can use both attributes together, if you need to configure other `#[func]`-specific keys.
 ///
 /// For example, the following method declarations are all equivalent:
-/// ```
+/// ```no_run
+/// # // Polyfill without full codegen.
+/// # #![allow(non_camel_case_types)]
+/// # #[cfg(not(feature = "codegen-full"))]
+/// # enum RpcMode { DISABLED, ANY_PEER, AUTHORITY }
+/// # #[cfg(not(feature = "codegen-full"))]
+/// # enum TransferMode { UNRELIABLE, UNRELIABLE_ORDERED, RELIABLE }
+/// # #[cfg(not(feature = "codegen-full"))]
+/// # pub struct RpcConfig { pub rpc_mode: RpcMode, pub transfer_mode: TransferMode, pub call_local: bool, pub channel: u32 }
+/// # #[cfg(not(feature = "codegen-full"))]
+/// # impl Default for RpcConfig { fn default() -> Self { todo!("never called") } }
+/// # #[cfg(feature = "codegen-full")]
 /// use godot::classes::multiplayer_api::RpcMode;
+/// # #[cfg(feature = "codegen-full")]
 /// use godot::classes::multiplayer_peer::TransferMode;
 /// use godot::prelude::*;
+/// # #[cfg(feature = "codegen-full")]
 /// use godot::register::RpcConfig;
 ///
 /// # #[derive(GodotClass)]
@@ -757,7 +749,38 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 /// [`TransferMode`]: ../classes/multiplayer_peer/struct.TransferMode.html
 /// [`RpcConfig`]: ../register/struct.RpcConfig.html
 ///
-/// # Constants and signals
+///
+/// # Signals
+///
+/// The `#[signal]` attribute declares a Godot signal, which can accept parameters, but not return any value.
+/// The procedural macro generates a type-safe API that allows you to connect and emit the signal from Rust.
+///
+/// ```no_run
+/// # use godot::prelude::*;
+/// #[derive(GodotClass)]
+/// #[class(init)]
+/// struct MyClass {
+///     base: Base<RefCounted>, // necessary for #[signal].
+/// }
+///
+/// #[godot_api]
+/// impl MyClass {
+///     #[signal]
+///     fn some_signal(my_parameter: Gd<Node>);
+/// }
+/// ```
+///
+/// The above implements the [`WithSignals`] trait for `MyClass`, which provides the `signals()` method. Through that
+/// method, you can access all declared signals in `self.signals().some_signal()` or `gd.signals().some_signal()`. The returned object is
+/// of type [`TypedSignal`], which provides further APIs for emitting and connecting, among others.
+///
+/// A detailed explanation with examples is available in the [book chapter _Registering signals_](https://godot-rust.github.io/book/register/signals.html).
+///
+/// [`WithSignals`]: ../obj/trait.WithSignals.html
+/// [`TypedSignal`]: ../register/struct.TypedSignal.html
+///
+///
+/// # Constants
 ///
 /// Please refer to [the book](https://godot-rust.github.io/book/register/constants.html).
 ///

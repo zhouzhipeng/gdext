@@ -12,18 +12,34 @@ use crate::class::{
     make_property_impl, make_virtual_callback, BeforeKind, Field, FieldDefault, FieldExport,
     FieldVar, Fields, SignatureInfo,
 };
-use crate::util::{bail, error, ident, path_ends_with_complex, require_api_version, KvParser};
+use crate::util::{
+    bail, error, format_funcs_collection_struct, ident, path_ends_with_complex,
+    require_api_version, KvParser,
+};
 use crate::{handle_mutually_exclusive_keys, util, ParseResult};
 
 pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
-    let class = item
-        .as_struct()
-        .ok_or_else(|| venial::Error::new("Not a valid struct"))?;
+    let class = item.as_struct().ok_or_else(|| {
+        util::error_fn(
+            "#[derive(GodotClass)] is only allowed on structs",
+            item.name(),
+        )
+    })?;
 
+    if class.generic_params.is_some() {
+        return bail!(
+            &class.generic_params,
+            "#[derive(GodotClass)] does not support lifetimes or generic parameters",
+        );
+    }
+
+    let mut modifiers = Vec::new();
     let named_fields = named_fields(class)?;
     let mut struct_cfg = parse_struct_attributes(class)?;
     let mut fields = parse_fields(named_fields, struct_cfg.init_strategy)?;
-    let is_editor_plugin = struct_cfg.is_editor_plugin();
+    if struct_cfg.is_editor_plugin() {
+        modifiers.push(quote! { with_editor_plugin })
+    }
 
     let mut deprecations = std::mem::take(&mut struct_cfg.deprecations);
     deprecations.append(&mut fields.deprecations);
@@ -44,9 +60,9 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         quote! { ClassName::alloc_next_unicode(#class_name_str) }
     };
 
-    let class_name_obj = util::class_name_obj(class_name);
-
-    let is_internal = struct_cfg.is_internal;
+    if struct_cfg.is_internal {
+        modifiers.push(quote! { with_internal })
+    }
     let base_ty = &struct_cfg.base_ty;
     #[cfg(all(feature = "register-docs", since_api = "4.3"))]
     let docs = crate::docs::make_definition_docs(
@@ -57,7 +73,6 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
     #[cfg(not(all(feature = "register-docs", since_api = "4.3")))]
     let docs = quote! {};
     let base_class = quote! { ::godot::classes::#base_ty };
-    let base_class_name_obj = util::class_name_obj(&base_class);
     let inherits_macro = format_ident!("unsafe_inherits_transitive_{}", base_ty);
 
     let prv = quote! { ::godot::private };
@@ -88,18 +103,12 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
 
     let mut init_expecter = TokenStream::new();
     let mut godot_init_impl = TokenStream::new();
-    let mut create_fn = quote! { None };
-    let mut recreate_fn = quote! { None };
     let mut is_instantiable = true;
 
     match struct_cfg.init_strategy {
         InitStrategy::Generated => {
             godot_init_impl = make_godot_init_impl(class_name, &fields);
-            create_fn = quote! { Some(#prv::callbacks::create::<#class_name>) };
-
-            if cfg!(since_api = "4.2") {
-                recreate_fn = quote! { Some(#prv::callbacks::recreate::<#class_name>) };
-            }
+            modifiers.push(quote! { with_generated::<#class_name> });
         }
         InitStrategy::UserDefined => {
             let fn_name = format_ident!("class_{}_must_have_an_init_method", class_name);
@@ -116,14 +125,26 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
             is_instantiable = false;
         }
     };
+    if is_instantiable {
+        modifiers.push(quote! { with_instantiable });
+    }
 
-    let default_get_virtual_fn = if has_default_virtual {
-        quote! { Some(#prv::callbacks::default_get_virtual::<#class_name>) }
-    } else {
-        quote! { None }
+    if has_default_virtual {
+        modifiers.push(quote! { with_default_get_virtual_fn::<#class_name> });
+    }
+
+    if struct_cfg.is_tool {
+        modifiers.push(quote! { with_tool })
+    }
+
+    // Declares a "funcs collection" struct that, for holds a constant for each #[func].
+    // That constant maps the Rust name (constant ident) to the Godot registered name (string value).
+    let funcs_collection_struct_name = format_funcs_collection_struct(class_name);
+    let funcs_collection_struct = quote! {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #funcs_collection_struct_name {}
     };
-
-    let is_tool = struct_cfg.is_tool;
 
     Ok(quote! {
         impl ::godot::obj::GodotClass for #class_name {
@@ -148,6 +169,7 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
             type Exportable = <<Self as ::godot::obj::GodotClass>::Base as ::godot::obj::Bounds>::Exportable;
         }
 
+        #funcs_collection_struct
         #godot_init_impl
         #godot_withbase_impl
         #godot_exports_impl
@@ -156,39 +178,11 @@ pub fn derive_godot_class(item: venial::Item) -> ParseResult<TokenStream> {
         #( #deprecations )*
         #( #errors )*
 
-        ::godot::sys::plugin_add!(__GODOT_PLUGIN_REGISTRY in #prv; #prv::ClassPlugin {
-            class_name: #class_name_obj,
-            item: #prv::PluginItem::Struct {
-                base_class_name: #base_class_name_obj,
-                generated_create_fn: #create_fn,
-                generated_recreate_fn: #recreate_fn,
-                register_properties_fn: #prv::ErasedRegisterFn {
-                    raw: #prv::callbacks::register_user_properties::<#class_name>,
-                },
-                free_fn: #prv::callbacks::free::<#class_name>,
-                default_get_virtual_fn: #default_get_virtual_fn,
-                is_tool: #is_tool,
-                is_editor_plugin: #is_editor_plugin,
-                is_internal: #is_internal,
-                is_instantiable: #is_instantiable,
-                #docs
-            },
-            init_level: {
-                let level = <#class_name as ::godot::obj::GodotClass>::INIT_LEVEL;
-                let base_level = <#base_class as ::godot::obj::GodotClass>::INIT_LEVEL;
-
-                // Sanity check for init levels. Note that this does not cover cases where GodotClass is manually defined;
-                // might make sense to add a run-time check during class registration.
-                assert!(
-                    level >= base_level,
-                    "Class `{class}` has init level `{level:?}`, but its base class has init level `{base_level:?}`.\n\
-                    A class cannot be registered before its base class.",
-                    class = #class_name_str,
-                );
-
-                level
-            }
-        });
+        ::godot::sys::plugin_add!(__GODOT_PLUGIN_REGISTRY in #prv; #prv::ClassPlugin::new::<#class_name>(
+            #prv::PluginItem::Struct(
+                #prv::Struct::new::<#class_name>(#docs)#(.#modifiers())*
+            )
+        ));
 
         #prv::class_macros::#inherits_macro!(#class_name);
     })
@@ -298,13 +292,30 @@ fn make_user_class_impl(
         let tool_check = util::make_virtual_tool_check();
         let signature_info = SignatureInfo::fn_ready();
 
-        let callback = make_virtual_callback(class_name, signature_info, BeforeKind::OnlyBefore);
+        let callback =
+            make_virtual_callback(class_name, &signature_info, BeforeKind::OnlyBefore, None);
+
+        // See also __virtual_call() codegen.
+        // This doesn't explicitly check if the base class inherits from Node (and thus has `_ready`), but the derive-macro already does
+        // this for the `OnReady` field declaration.
+        let (hash_param, hash_check);
+        if cfg!(since_api = "4.4") {
+            hash_param = quote! { hash: u32, };
+            hash_check = quote! { && hash == ::godot::sys::known_virtual_hashes::Node::ready };
+        } else {
+            hash_param = TokenStream::new();
+            hash_check = TokenStream::new();
+        }
+
         let default_virtual_fn = quote! {
-            fn __default_virtual_call(name: &str) -> ::godot::sys::GDExtensionClassCallVirtual {
+            fn __default_virtual_call(
+                name: &str,
+                #hash_param
+            ) -> ::godot::sys::GDExtensionClassCallVirtual {
                 use ::godot::obj::UserClass as _;
                 #tool_check
 
-                if name == "_ready" {
+                if name == "_ready" #hash_check {
                     #callback
                 } else {
                     None
@@ -318,12 +329,14 @@ fn make_user_class_impl(
 
     let user_class_impl = quote! {
         impl ::godot::obj::UserClass for #class_name {
+            #[doc(hidden)]
             fn __config() -> ::godot::private::ClassConfig {
                 ::godot::private::ClassConfig {
                     is_tool: #is_tool,
                 }
             }
 
+            #[doc(hidden)]
             fn __before_ready(&mut self) {
                 #rpc_registrations
                 #onready_inits
@@ -410,13 +423,16 @@ fn parse_struct_attributes(class: &venial::Struct) -> ParseResult<ClassAttribute
 ///
 /// Errors if `class` is a tuple struct.
 fn named_fields(class: &venial::Struct) -> ParseResult<Vec<(venial::NamedField, Punct)>> {
-    // This is separate from parse_fields to improve compile errors.  The errors from here demand larger and more non-local changes from the API
+    // This is separate from parse_fields to improve compile errors. The errors from here demand larger and more non-local changes from the API
     // user than those from parse_struct_attributes, so this must be run first.
     match &class.fields {
+        // TODO disallow unit structs in the future
+        // It often happens that over time, a registered class starts to require a base field.
+        // Extending a {} struct requires breaking less code, so we should encourage it from the start.
         venial::Fields::Unit => Ok(vec![]),
         venial::Fields::Tuple(_) => bail!(
             &class.fields,
-            "#[derive(GodotClass)] not supported for tuple structs",
+            "#[derive(GodotClass)] is not supported for tuple structs",
         )?,
         venial::Fields::Named(fields) => Ok(fields.fields.inner.clone()),
     }
