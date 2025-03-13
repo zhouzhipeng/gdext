@@ -94,7 +94,7 @@ pub fn transform_inherent_impl(
     let consts = process_godot_constants(&mut impl_block)?;
 
     #[cfg(all(feature = "register-docs", since_api = "4.3"))]
-    let docs = crate::docs::make_inherent_impl_docs(&funcs, &consts, &signals);
+    let docs = crate::docs::document_inherent_impl(&funcs, &consts, &signals);
     #[cfg(not(all(feature = "register-docs", since_api = "4.3")))]
     let docs = quote! {};
 
@@ -172,7 +172,7 @@ pub fn transform_inherent_impl(
         };
 
         let class_registration = quote! {
-            ::godot::sys::plugin_add!(__GODOT_PLUGIN_REGISTRY in #prv; #prv::ClassPlugin::new::<#class_name>(
+            ::godot::sys::plugin_add!(#prv::__GODOT_PLUGIN_REGISTRY; #prv::ClassPlugin::new::<#class_name>(
                 #prv::PluginItem::InherentImpl(#prv::InherentImpl::new::<#class_name>(#docs))
             ));
         };
@@ -319,18 +319,14 @@ fn process_godot_fns(
                         "#[signal] must not have a body; declare the function with a semicolon"
                     );
                 }
-                if function.vis_marker.is_some() {
-                    return bail!(
-                        &function.vis_marker,
-                        "#[signal] must not have a visibility specifier; signals are always public"
-                    );
-                }
 
                 let external_attributes = function.attributes.clone();
-                let sig = util::reduce_to_signature(function);
+
+                let mut fn_signature = util::reduce_to_signature(function);
+                fn_signature.vis_marker = function.vis_marker.clone();
 
                 signal_definitions.push(SignalDefinition {
-                    signature: sig,
+                    fn_signature,
                     external_attributes,
                     has_builder: !signal.no_builder,
                 });
