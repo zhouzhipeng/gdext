@@ -64,7 +64,7 @@ pub fn get_api_level(class: &JsonClass) -> ClassCodegenLevel {
             // https://github.com/godotengine/godot/issues/103867
             "OpenXRInteractionProfileEditorBase"
             | "OpenXRInteractionProfileEditor"
-            | "OpenXRBindingModifierEditor" => cfg!(before_api = "4.4"),
+            | "OpenXRBindingModifierEditor" => cfg!(before_api = "4.5"),
 
             // https://github.com/godotengine/godot/issues/86206
             "ResourceImporterOggVorbis" | "ResourceImporterMP3" => cfg!(before_api = "4.3"),
