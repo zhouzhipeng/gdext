@@ -5,9 +5,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::framework::itest;
+use std::hash::Hasher;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use godot::builtin::{
-    array, dict, varray, Array, Callable, Color, GString, NodePath, StringName, Variant,
+    array, varray, vdict, vslice, Array, Callable, Color, GString, NodePath, StringName, Variant,
     VariantArray, Vector2,
 };
 use godot::classes::{Node2D, Object, RefCounted};
@@ -15,8 +17,8 @@ use godot::init::GdextBuild;
 use godot::meta::ToGodot;
 use godot::obj::{Gd, NewAlloc, NewGd};
 use godot::register::{godot_api, GodotClass};
-use std::hash::Hasher;
-use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::framework::itest;
 
 #[derive(GodotClass)]
 #[class(init, base=RefCounted)]
@@ -71,14 +73,14 @@ fn callable_validity() {
 fn callable_hash() {
     let obj = CallableTestObj::new_gd();
     assert_eq!(
-        obj.callable("assign_int").hash(),
-        obj.callable("assign_int").hash()
+        obj.callable("assign_int").hash_u32(),
+        obj.callable("assign_int").hash_u32()
     );
 
     // Not guaranteed, but unlikely.
     assert_ne!(
-        obj.callable("assign_int").hash(),
-        obj.callable("stringify_int").hash()
+        obj.callable("assign_int").hash_u32(),
+        obj.callable("stringify_int").hash_u32()
     );
 }
 
@@ -102,22 +104,22 @@ fn callable_object_method() {
 #[cfg(since_api = "4.3")]
 fn callable_variant_method() {
     // Dictionary
-    let dict = dict! { "one": 1, "value": 2 };
+    let dict = vdict! { "one": 1, "value": 2 };
     let dict_get = Callable::from_variant_method(&dict.to_variant(), "get");
-    assert_eq!(dict_get.call(&["one".to_variant()]), 1.to_variant());
+    assert_eq!(dict_get.call(vslice!["one"]), 1.to_variant());
 
     // GString
     let string = GString::from("some string").to_variant();
     let string_md5 = Callable::from_variant_method(&string, "md5_text");
     assert_eq!(
-        string_md5.call(&[]),
+        string_md5.call(vslice![]), // use vslice![] as alternative &[] syntax.
         "5ac749fbeec93607fc28d666be85e73a".to_variant()
     );
 
     // Object
     let obj = CallableTestObj::new_gd().to_variant();
     let obj_stringify = Callable::from_variant_method(&obj, "stringify_int");
-    assert_eq!(obj_stringify.call(&[10.to_variant()]), "10".to_variant());
+    assert_eq!(obj_stringify.call(vslice![10]), "10".to_variant());
 
     // Vector3
     let vector = Vector2::new(-1.2, 2.5).to_variant();
@@ -138,7 +140,7 @@ fn callable_variant_method() {
 #[itest]
 #[cfg(since_api = "4.4")]
 fn callable_static() {
-    let callable = Callable::from_local_static("CallableTestObj", "concat_array");
+    let callable = Callable::from_class_static("CallableTestObj", "concat_array");
 
     assert_eq!(callable.object(), None);
     assert_eq!(callable.object_id(), None);
@@ -168,7 +170,7 @@ fn callable_static() {
 #[itest]
 #[cfg(since_api = "4.4")]
 fn callable_static_bind() {
-    let callable = Callable::from_local_static("CallableTestObj", "concat_array");
+    let callable = Callable::from_class_static("CallableTestObj", "concat_array");
     assert!(callable.is_valid());
 
     // Test varying binds to static callables.
@@ -211,7 +213,6 @@ fn callable_callv() {
     assert_eq!(Callable::invalid().callv(&varray![1, 2, 3]), Variant::nil());
 }
 
-#[cfg(since_api = "4.2")]
 #[itest]
 fn callable_call() {
     // See callable_callv() for future improvements.
@@ -220,18 +221,15 @@ fn callable_call() {
     let callable = obj.callable("assign_int");
 
     assert_eq!(obj.bind().value, 0);
-    callable.call(&[10.to_variant()]);
+    callable.call(vslice![10]);
     assert_eq!(obj.bind().value, 10);
 
-    callable.call(&[20.to_variant(), 30.to_variant()]);
+    callable.call(vslice![20, 30]);
     assert_eq!(obj.bind().value, 10);
 
-    assert_eq!(callable.call(&["string".to_variant()]), Variant::nil());
+    assert_eq!(callable.call(vslice!["string"]), Variant::nil());
 
-    assert_eq!(
-        Callable::invalid().call(&[1.to_variant(), 2.to_variant(), 3.to_variant()]),
-        Variant::nil()
-    );
+    assert_eq!(Callable::invalid().call(vslice![1, 2, 3]), Variant::nil());
 }
 
 #[itest]
@@ -248,7 +246,6 @@ fn callable_call_return() {
     assert_eq!(callable.callv(&varray!["string"]), Variant::nil());
 }
 
-#[cfg(since_api = "4.2")]
 #[itest]
 fn callable_call_engine() {
     let obj = Node2D::new_alloc();
@@ -259,11 +256,11 @@ fn callable_call_engine() {
     assert_eq!(cb.method_name(), Some(StringName::from("set_position")));
 
     let pos = Vector2::new(5.0, 7.0);
-    cb.call(&[pos.to_variant()]);
+    cb.call(vslice![pos]);
     assert_eq!(obj.get_position(), pos);
 
     let pos = Vector2::new(1.0, 23.0);
-    let bound = cb.bind(&[pos.to_variant()]);
+    let bound = cb.bind(vslice![pos]);
     bound.call(&[]);
     assert_eq!(obj.get_position(), pos);
 
@@ -282,12 +279,11 @@ fn callable_bindv() {
     );
 }
 
-#[cfg(since_api = "4.2")]
 #[itest]
 fn callable_bind() {
     let obj = CallableTestObj::new_gd();
     let callable = obj.callable("stringify_int");
-    let callable_bound = callable.bind(&[10.to_variant()]);
+    let callable_bound = callable.bind(vslice![10]);
 
     assert_eq!(
         callable_bound.call(&[]),
@@ -295,7 +291,6 @@ fn callable_bind() {
     );
 }
 
-#[cfg(since_api = "4.2")]
 #[itest]
 fn callable_unbind() {
     let obj = CallableTestObj::new_gd();
@@ -303,12 +298,7 @@ fn callable_unbind() {
     let callable_unbound = callable.unbind(3);
 
     assert_eq!(
-        callable_unbound.call(&[
-            121.to_variant(),
-            20.to_variant(),
-            30.to_variant(),
-            40.to_variant()
-        ]),
+        callable_unbound.call(vslice![121, 20, 30, 40]),
         121.to_variant().stringify().to_variant()
     );
 }
@@ -327,9 +317,7 @@ fn callable_get_argument_count() {
     let concat_array = obj.callable("concat_array");
     assert_eq!(concat_array.get_argument_count(), 4);
     assert_eq!(
-        concat_array
-            .bind(&[10.to_variant(), "hello".to_variant()])
-            .get_argument_count(),
+        concat_array.bind(vslice![10, "hello"]).get_argument_count(),
         2
     );
 }
@@ -379,21 +367,23 @@ impl CallableRefcountTest {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Tests and infrastructure for custom callables
 
-#[cfg(since_api = "4.2")]
+// Used to be #[cfg(since_api = "4.2")], could maybe be moved to own file.
 pub mod custom_callable {
-    use super::*;
-    use crate::framework::{assert_eq_self, quick_thread, suppress_panic_log, ThreadCrosser};
-    use godot::builtin::{Dictionary, RustCallable};
-    use godot::prelude::Signal;
-    use godot::sys;
-    use godot::sys::GdextBuild;
     use std::fmt;
     use std::hash::Hash;
     use std::sync::{Arc, Mutex};
 
+    use godot::builtin::{Dictionary, RustCallable};
+    use godot::prelude::Signal;
+    use godot::sys;
+    use godot::sys::GdextBuild;
+
+    use super::*;
+    use crate::framework::{assert_eq_self, quick_thread, suppress_panic_log, ThreadCrosser};
+
     #[itest]
-    fn callable_from_local_fn() {
-        let callable = Callable::from_local_fn("sum", sum);
+    fn callable_from_fn() {
+        let callable = Callable::from_fn("sum", sum);
 
         assert!(callable.is_valid());
         assert!(!callable.is_null());
@@ -408,16 +398,15 @@ pub mod custom_callable {
         assert_eq!(sum2, 0.to_variant());
     }
 
-    // Without this feature, any access to the global binding from another thread fails; so the from_local_fn() cannot be tested in isolation.
+    // Without this feature, any access to the global binding from another thread fails; so the from_fn() cannot be tested in isolation.
     #[itest]
-    fn callable_from_local_fn_crossthread() {
+    fn callable_from_fn_crossthread() {
         // This static is a workaround for not being able to propagate failed `Callable` invocations as panics.
         // See note in itest callable_call() for further info.
         static GLOBAL: sys::Global<i32> = sys::Global::default();
 
-        let callable = Callable::from_local_fn("change_global", |_args| {
+        let callable = Callable::from_fn("change_global", |_args| {
             *GLOBAL.lock() = 777;
-            Ok(Variant::nil())
         });
 
         // Note that Callable itself isn't Sync/Send, so we have to transfer it unsafely.
@@ -425,16 +414,14 @@ pub mod custom_callable {
         let crosser = ThreadCrosser::new(callable);
 
         // Create separate thread and ensure calling fails.
-        // Why expect_panic for (single-threaded && Debug) but not (multi-threaded || Release) mode:
-        // - Check is only enabled in Debug, not Release.
-        // - We currently can't catch panics from Callable invocations, see above. True for both single/multi-threaded.
-        // - In single-threaded mode, there's an FFI access check which panics as soon as another thread is invoked. *This* panics.
-        // - In multi-threaded, we need to observe the effect instead (see below).
-
-        if !cfg!(feature = "experimental-threads") && cfg!(debug_assertions) {
-            // Single-threaded and Debug.
+        // Why expect_panic for (safeguards_balanced && single-threaded) but not otherwise:
+        // - In single-threaded mode with balanced safeguards, there's an FFI access check which panics when another thread is invoked.
+        // - In multi-threaded mode OR with safeguards disengaged, the callable may or may not execute, but won't panic at the FFI level.
+        // - We can't catch panics from Callable invocations yet (see above), only the FFI access panics.
+        if cfg!(safeguards_balanced) && !cfg!(feature = "experimental-threads") {
+            // Single-threaded with balanced safeguards: FFI access check will panic.
             crate::framework::expect_panic(
-                "Callable created with from_local_fn() must panic when invoked on other thread",
+                "Callable created with from_fn() must panic when invoked on other thread",
                 || {
                     quick_thread(|| {
                         let callable = unsafe { crosser.extract() };
@@ -443,18 +430,17 @@ pub mod custom_callable {
                 },
             );
         } else {
-            // Multi-threaded OR Release.
+            // Multi-threaded OR safeguards disengaged: No FFI panic, but callable may or may not execute.
             quick_thread(|| {
                 let callable = unsafe { crosser.extract() };
                 callable.callv(&varray![5]);
             });
         }
 
-        assert_eq!(
-            *GLOBAL.lock(),
-            0,
-            "Callable created with from_local_fn() must not run when invoked on other thread"
-        );
+        // Expected value depends on whether thread checks are enforced.
+        // 777: callable *is* executed on other thread.
+        let expected = if cfg!(safeguards_balanced) { 0 } else { 777 };
+        assert_eq!(*GLOBAL.lock(), expected);
     }
 
     #[itest]
@@ -479,27 +465,25 @@ pub mod custom_callable {
     }
 
     #[itest]
-    fn callable_custom_with_err() {
-        let callable_with_err =
-            Callable::from_local_fn("on_error_doesnt_crash", |_args: &[&Variant]| Err(()));
+    fn callable_from_fn_nil() {
+        let callable_with_err = Callable::from_fn("returns_nil", |_args: &[&Variant]| {});
 
-        // Causes error in Godot, but should not crash.
         assert_eq!(callable_with_err.callv(&varray![]), Variant::nil());
     }
 
     #[itest]
     fn callable_from_fn_eq() {
-        let a = Callable::from_local_fn("sum", sum);
+        let a = Callable::from_fn("sum", sum);
         let b = a.clone();
-        let c = Callable::from_local_fn("sum", sum);
+        let c = Callable::from_fn("sum", sum);
 
         assert_eq!(a, b, "same function, same instance -> equal");
         assert_ne!(a, c, "same function, different instance -> not equal");
     }
 
-    fn sum(args: &[&Variant]) -> Result<Variant, ()> {
-        let sum: i32 = args.iter().map(|arg| arg.to::<i32>()).sum();
-        Ok(sum.to_variant())
+    // Now non-Variant return type.
+    fn sum(args: &[&Variant]) -> i32 {
+        args.iter().map(|arg| arg.to::<i32>()).sum()
     }
 
     #[itest]
@@ -584,8 +568,11 @@ pub mod custom_callable {
         assert_eq!(hash_count(&at), 1, "hash for a untouched if b is inserted");
         assert_eq!(hash_count(&bt), 1, "hash needed for b dict key");
 
-        // Introduced in https://github.com/godotengine/godot/pull/96797.
-        let eq = if GdextBuild::since_api("4.4") { 2 } else { 1 };
+        let eq = match GdextBuild::godot_runtime_version_triple() {
+            (4, 1..=3, _) => 1,
+            (4, 4, 0..=1) => 2, // changed in https://github.com/godotengine/godot/pull/96797.
+            _ => 1,             // changed in https://github.com/godotengine/godot/pull/103647.
+        };
 
         assert_eq!(eq_count(&at), eq, "hash collision, eq for a needed");
         assert_eq!(eq_count(&bt), eq, "hash collision, eq for b needed");
@@ -595,10 +582,10 @@ pub mod custom_callable {
     fn callable_callv_panic_from_fn() {
         let received = Arc::new(AtomicU32::new(0));
         let received_callable = received.clone();
-        let callable = Callable::from_local_fn("test", move |_args| {
+        let callable = Callable::from_fn("test", move |_args| {
             suppress_panic_log(|| {
                 panic!("TEST: {}", received_callable.fetch_add(1, Ordering::SeqCst))
-            })
+            });
         });
 
         assert_eq!(Variant::nil(), callable.callv(&varray![]));
@@ -627,7 +614,7 @@ pub mod custom_callable {
 
         let obj = RefCounted::new_gd();
         let signal = Signal::from_object_signal(&obj, "script_changed");
-        signal.connect(&some_callable, 0);
+        signal.connect(&some_callable);
 
         // Given Custom Callable is connected to signal
         // if callable with the very same hash is already connected.
@@ -649,6 +636,19 @@ pub mod custom_callable {
         // The hashes are, once again, identical.
         assert!(signal.is_connected(&some_callable));
         assert!(signal.is_connected(&identical_callable));
+    }
+
+    #[itest]
+    fn callable_from_once_fn() {
+        let callable = Callable::__once_fn("once_test", move |_| 42.to_variant());
+
+        // First call should succeed.
+        let result = callable.call(&[]);
+        assert_eq!(result.to::<i32>(), 42);
+
+        // Second call should fail (panic currently isn't propagated, see other tests).
+        let result = callable.call(&[]);
+        assert!(result.is_nil());
     }
 
     // ------------------------------------------------------------------------------------------------------------------------------------------
@@ -702,12 +702,12 @@ pub mod custom_callable {
     }
 
     impl RustCallable for Adder {
-        fn invoke(&mut self, args: &[&Variant]) -> Result<Variant, ()> {
+        fn invoke(&mut self, args: &[&Variant]) -> Variant {
             for arg in args {
                 self.sum += arg.to::<i32>();
             }
 
-            Ok(self.sum.to_variant())
+            self.sum.to_variant()
         }
     }
 
@@ -755,7 +755,7 @@ pub mod custom_callable {
     }
 
     impl RustCallable for PanicCallable {
-        fn invoke(&mut self, _args: &[&Variant]) -> Result<Variant, ()> {
+        fn invoke(&mut self, _args: &[&Variant]) -> Variant {
             panic!("TEST: {}", self.0.fetch_add(1, Ordering::SeqCst))
         }
     }

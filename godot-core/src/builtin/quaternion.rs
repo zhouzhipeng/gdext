@@ -5,12 +5,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+
 use godot_ffi as sys;
-use sys::{ffi_methods, GodotFfi};
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
 
 use crate::builtin::math::{ApproxEq, FloatExt, GlamConv, GlamType};
 use crate::builtin::{inner, real, Basis, EulerOrder, RQuat, RealConv, Vector3};
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// Unit quaternion to represent 3D rotations.
 ///
@@ -76,11 +77,11 @@ impl Quaternion {
     ///
     /// *Godot equivalent: `Quaternion(arc_from: Vector3, arc_to: Vector3)`*
     pub fn from_rotation_arc(arc_from: Vector3, arc_to: Vector3) -> Self {
-        debug_assert!(
+        sys::balanced_assert!(
             arc_from.is_normalized(),
             "input 1 (`arc_from`) in `Quaternion::from_rotation_arc` must be a unit vector"
         );
-        debug_assert!(
+        sys::balanced_assert!(
             arc_to.is_normalized(),
             "input 2 (`arc_to`) in `Quaternion::from_rotation_arc` must be a unit vector"
         );
@@ -105,11 +106,6 @@ impl Quaternion {
         } else {
             Self::from_axis_angle(v, theta)
         }
-    }
-
-    #[deprecated = "Renamed to `Quaternion::exp()`"]
-    pub fn to_exp(self) -> Self {
-        self.exp()
     }
 
     pub fn from_euler(euler: Vector3) -> Self {
@@ -161,11 +157,6 @@ impl Quaternion {
     /// _Godot equivalent: `Quaternion.get_euler()`_
     pub fn get_euler_with(self, order: EulerOrder) -> Vector3 {
         Basis::from_quaternion(self).get_euler_with(order)
-    }
-
-    #[deprecated = "Renamed to `get_euler()` + `get_euler_with()`"]
-    pub fn to_euler(self, order: EulerOrder) -> Vector3 {
-        self.get_euler_with(order)
     }
 
     pub fn inverse(self) -> Self {
@@ -269,7 +260,7 @@ impl Quaternion {
     }
 
     #[doc(hidden)]
-    pub fn as_inner(&self) -> inner::InnerQuaternion {
+    pub fn as_inner(&self) -> inner::InnerQuaternion<'_> {
         inner::InnerQuaternion::from_outer(self)
     }
 
@@ -347,14 +338,12 @@ impl Mul<Vector3> for Quaternion {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Quaternion {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::QUATERNION
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::QUATERNION);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(Quaternion);
+crate::meta::impl_godot_as_self!(Quaternion: ByValue);
 
 impl std::fmt::Display for Quaternion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

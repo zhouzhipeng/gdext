@@ -7,11 +7,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use godot::builtin::{dict, varray, Dictionary, Variant};
-use godot::meta::{FromGodot, ToGodot};
-use godot::sys::GdextBuild;
+use godot::builtin::{varray, vdict, Dictionary, Variant, VariantType};
+use godot::classes::RefCounted;
+use godot::meta::{ElementType, FromGodot, ToGodot};
+use godot::obj::NewGd;
 
-use crate::framework::{expect_panic, itest};
+use crate::framework::{
+    assert_match, create_gdscript, expect_panic, expect_panic_or_nothing, itest,
+};
 
 #[itest]
 fn dictionary_default() {
@@ -55,7 +58,7 @@ fn dictionary_from() {
 
 #[itest]
 fn dictionary_macro() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar"
@@ -74,11 +77,11 @@ fn dictionary_macro() {
         "key = \"baz\""
     );
 
-    let empty = dict!();
+    let empty = vdict!();
     assert!(empty.is_empty());
 
     let key = "num";
-    let dict_complex = dict! {
+    let dict_complex = vdict! {
         key: 10,
         "bool": true,
         (1 + 2): Variant::nil(),
@@ -90,11 +93,11 @@ fn dictionary_macro() {
 
 #[itest]
 fn dictionary_clone() {
-    let subdictionary = dict! {
+    let subdictionary = vdict! {
         "baz": true,
         "foobar": false
     };
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": subdictionary.clone()
     };
@@ -109,40 +112,47 @@ fn dictionary_clone() {
 fn dictionary_hash() {
     use godot::builtin::Vector2i;
 
-    let a = dict! {
+    let a = vdict! {
         "foo": 0,
         "bar": true,
         (Vector2i::new(4, -1)): "foobar",
     };
-    let b = dict! {
+    let b = vdict! {
         "foo": 0,
         "bar": true,
         (Vector2i::new(4, -1)): "foobar" // No comma to test macro.
     };
-    let c = dict! {
+    let c = vdict! {
         "foo": 0,
         (Vector2i::new(4, -1)): "foobar",
         "bar": true,
     };
 
-    assert_eq!(a.hash(), b.hash(), "equal dictionaries have same hash");
+    assert_eq!(
+        a.hash_u32(),
+        b.hash_u32(),
+        "equal dictionaries have same hash"
+    );
     assert_ne!(
-        a.hash(),
-        c.hash(),
+        a.hash_u32(),
+        c.hash_u32(),
         "dictionaries with reordered content have different hash"
     );
 
     // NaNs are not equal (since Godot 4.2) but share same hash.
-    assert_eq!(dict! {772: f32::NAN}.hash(), dict! {772: f32::NAN}.hash());
+    assert_eq!(
+        vdict! {772: f32::NAN}.hash_u32(),
+        vdict! {772: f32::NAN}.hash_u32()
+    );
 }
 
 #[itest]
 fn dictionary_duplicate_deep() {
-    let subdictionary = dict! {
+    let subdictionary = vdict! {
         "baz": true,
         "foobar": false
     };
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": subdictionary.clone()
     };
@@ -157,11 +167,11 @@ fn dictionary_duplicate_deep() {
 
 #[itest]
 fn dictionary_duplicate_shallow() {
-    let subdictionary = dict! {
+    let subdictionary = vdict! {
         "baz": true,
         "foobar": false
     };
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": subdictionary.clone()
     };
@@ -181,7 +191,7 @@ fn dictionary_duplicate_shallow() {
 
 #[itest]
 fn dictionary_get() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -212,7 +222,7 @@ fn dictionary_get() {
 
 #[itest]
 fn dictionary_at() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "baz": "foobar",
         "nil": Variant::nil(),
@@ -227,8 +237,64 @@ fn dictionary_at() {
 }
 
 #[itest]
+fn dictionary_get_or_insert() {
+    let mut dict = vdict! {
+        "existing": 11,
+        "existing_nil": Variant::nil(),
+    };
+
+    // Existing key -> return old value.
+    let result = dict.get_or_insert("existing", 22);
+    assert_eq!(result, 11.to_variant());
+    assert_eq!(dict.at("existing"), 11.to_variant());
+
+    // New key -> insert + return new value.
+    let result = dict.get_or_insert("new_key", Variant::nil());
+    assert_eq!(result, Variant::nil());
+    assert_eq!(dict.at("new_key"), Variant::nil());
+
+    // Existing key, with NIL value -> return old value.
+    let result = dict.get_or_insert("existing_nil", "string");
+    assert_eq!(result, Variant::nil());
+    assert_eq!(dict.at("existing_nil"), Variant::nil());
+
+    // New NIL key -> insert + return new value.
+    let result = dict.get_or_insert(Variant::nil(), 11);
+    assert_eq!(result, 11.to_variant());
+    assert_eq!(dict.at(Variant::nil()), 11.to_variant());
+
+    // Existing NIL key -> return old value.
+    let result = dict.get_or_insert(Variant::nil(), 22);
+    assert_eq!(result, 11.to_variant());
+    assert_eq!(dict.at(Variant::nil()), 11.to_variant());
+}
+
+#[itest]
+fn dictionary_set() {
+    let mut dictionary = vdict! { "zero": 0, "one": 1 };
+
+    dictionary.set("zero", 2);
+    assert_eq!(dictionary, vdict! { "zero": 2, "one": 1 });
+}
+
+#[itest]
+fn dictionary_set_readonly() {
+    let mut dictionary = vdict! { "zero": 0, "one": 1 }.into_read_only();
+
+    // Fails silently in safeguards-disengaged (no UB).
+    expect_panic_or_nothing(
+        "Mutating read-only dictionary (safeguards-balanced)",
+        || {
+            dictionary.set("zero", 2);
+        },
+    );
+
+    assert_eq!(dictionary.at("zero"), 0.to_variant());
+}
+
+#[itest]
 fn dictionary_insert() {
-    let mut dictionary = dict! {
+    let mut dictionary = vdict! {
         "foo": 0,
         "bar": 1,
     };
@@ -253,13 +319,13 @@ fn dictionary_insert() {
 
 #[itest]
 fn dictionary_insert_multiple() {
-    let mut dictionary = dict! {};
+    let mut dictionary = vdict! {};
     assert!(dictionary.is_empty());
 
     dictionary.set(1, true);
     assert_eq!(dictionary.get(1), Some(true.to_variant()));
 
-    let mut other = dict! {};
+    let mut other = vdict! {};
     assert!(other.is_empty());
 
     other.set(1, 2);
@@ -267,7 +333,7 @@ fn dictionary_insert_multiple() {
 }
 #[itest]
 fn dictionary_insert_long() {
-    let mut dictionary = dict! {};
+    let mut dictionary = vdict! {};
     let old = dictionary.insert("abcdefghijklmnopqrstuvwxyz", "zabcdefghijklmnopqrstuvwxy");
     assert_eq!(old, None);
     assert_eq!(
@@ -278,12 +344,12 @@ fn dictionary_insert_long() {
 
 #[itest]
 fn dictionary_extend() {
-    let mut dictionary = dict! {
+    let mut dictionary = vdict! {
         "foo": 0,
         "bar": true,
     };
     assert_eq!(dictionary.get("foo"), Some(0.to_variant()));
-    let other = dict! {
+    let other = vdict! {
         "bar": "new",
         "baz": Variant::nil(),
     };
@@ -291,10 +357,10 @@ fn dictionary_extend() {
     assert_eq!(dictionary.get("bar"), Some(true.to_variant()));
     assert_eq!(dictionary.get("baz"), Some(Variant::nil()));
 
-    let mut dictionary = dict! {
+    let mut dictionary = vdict! {
         "bar": true,
     };
-    let other = dict! {
+    let other = vdict! {
         "bar": "new",
     };
     dictionary.extend_dictionary(&other, true);
@@ -303,7 +369,7 @@ fn dictionary_extend() {
 
 #[itest]
 fn dictionary_remove() {
-    let mut dictionary = dict! {
+    let mut dictionary = vdict! {
         "foo": 0,
     };
     assert_eq!(dictionary.remove("foo"), Some(0.to_variant()));
@@ -313,7 +379,7 @@ fn dictionary_remove() {
 
 #[itest]
 fn dictionary_clear() {
-    let mut dictionary = dict! {
+    let mut dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar"
@@ -326,7 +392,7 @@ fn dictionary_clear() {
 
 #[itest]
 fn dictionary_find_key() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
     };
@@ -337,7 +403,7 @@ fn dictionary_find_key() {
 
 #[itest]
 fn dictionary_contains_keys() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
     };
@@ -357,7 +423,7 @@ fn dictionary_contains_keys() {
 
 #[itest]
 fn dictionary_keys_values() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
     };
@@ -368,20 +434,16 @@ fn dictionary_keys_values() {
 
 #[itest]
 fn dictionary_equal() {
-    assert_eq!(dict! {"foo": "bar"}, dict! {"foo": "bar"});
-    assert_ne!(dict! {"foo": "bar"}, dict! {"bar": "foo"});
+    assert_eq!(vdict! {"foo": "bar"}, vdict! {"foo": "bar"});
+    assert_ne!(vdict! {"foo": "bar"}, vdict! {"bar": "foo"});
 
-    // Changed in https://github.com/godotengine/godot/pull/74588.
-    if GdextBuild::before_api("4.2") {
-        assert_eq!(dict! {1: f32::NAN}, dict! {1: f32::NAN});
-    } else {
-        assert_ne!(dict! {1: f32::NAN}, dict! {1: f32::NAN});
-    }
+    // Note: used to be equal for Godot < 4.2; changed in https://github.com/godotengine/godot/pull/74588.
+    assert_ne!(vdict! {1: f32::NAN}, vdict! {1: f32::NAN});
 }
 
 #[itest]
 fn dictionary_iter() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -407,7 +469,7 @@ fn dictionary_iter_size_hint() {
     assert_eq!(iter.size_hint(), (0, Some(0)));
 
     // Test a full dictionary being emptied.
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -453,7 +515,7 @@ fn dictionary_iter_equals_big() {
 
 #[itest]
 fn dictionary_iter_insert() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -477,7 +539,7 @@ fn dictionary_iter_insert() {
 
 #[itest]
 fn dictionary_iter_insert_after_completion() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -516,7 +578,7 @@ fn dictionary_iter_big() {
 
 #[itest]
 fn dictionary_iter_simultaneous() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 10,
         "bar": true,
         "baz": "foobar",
@@ -592,7 +654,7 @@ fn dictionary_iter_panics() {
 
 #[itest]
 fn dictionary_iter_clear() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -633,7 +695,7 @@ fn dictionary_iter_clear() {
 
 #[itest]
 fn dictionary_iter_erase() {
-    let dictionary = dict! {
+    let dictionary = vdict! {
         "foo": 0,
         "bar": true,
         "baz": "foobar",
@@ -678,10 +740,90 @@ fn dictionary_should_format_with_display() {
     let d = Dictionary::new();
     assert_eq!(format!("{d}"), "{  }");
 
-    let d = dict! {
+    let d = vdict! {
         "one": 1,
         "two": true,
         "three": Variant::nil()
     };
     assert_eq!(format!("{d}"), "{ one: 1, two: true, three: <null> }")
+}
+
+#[itest]
+#[cfg(since_api = "4.4")]
+fn dictionary_element_type() {
+    use godot::meta::ElementType;
+
+    // Test untyped dictionary
+    let untyped = Dictionary::new();
+    assert!(
+        matches!(untyped.key_element_type(), ElementType::Untyped),
+        "expected untyped key for Dictionary"
+    );
+    assert!(
+        matches!(untyped.value_element_type(), ElementType::Untyped),
+        "expected untyped value for Dictionary"
+    );
+}
+
+#[itest]
+#[cfg(since_api = "4.4")]
+fn dictionary_element_type_custom_script() {
+    let gdscript = create_gdscript(
+        r#"
+extends RefCounted
+class_name CustomScriptForDictionaries
+
+func variant_variant_dict() -> Dictionary:
+    var dict := {}
+    dict["key1"] = self
+    return dict
+
+func builtin_variant_dict() -> Dictionary[String, Variant]:
+    return { "key1": 1, "key2": 2 }
+
+func builtin_class_dict() -> Dictionary[Color, RefCounted]:
+    return { Color.RED: RefCounted.new() }
+
+func variant_script_dict() -> Dictionary[Variant, CustomScriptForDictionaries]:
+    return {"key": self}
+"#,
+    );
+
+    let mut object = RefCounted::new_gd();
+    object.set_script(&gdscript);
+
+    // Test all 4 ElementType variants in alternating key/value pattern.
+
+    // 1) Dictionary.
+    let dict = object.call("variant_variant_dict", &[]).to::<Dictionary>();
+    assert_match!(dict.key_element_type(), ElementType::Untyped);
+    assert_match!(dict.value_element_type(), ElementType::Untyped);
+
+    // 2) Dictionary[String, Variant].
+    let dict = object.call("builtin_variant_dict", &[]).to::<Dictionary>();
+    assert_match!(
+        dict.key_element_type(),
+        ElementType::Builtin(VariantType::STRING)
+    );
+    assert_match!(dict.value_element_type(), ElementType::Untyped);
+
+    // 3) Dictionary[Color, RefCounted].
+    let dict = object.call("builtin_class_dict", &[]).to::<Dictionary>();
+    assert_match!(
+        dict.key_element_type(),
+        ElementType::Builtin(VariantType::COLOR)
+    );
+    assert_match!(dict.value_element_type(), ElementType::Class(class_name));
+    assert_eq!(class_name.to_string(), "RefCounted");
+
+    // 4) Dictionary[Variant, CustomScriptForDictionaries].
+    let dict = object.call("variant_script_dict", &[]).to::<Dictionary>();
+    assert_match!(dict.key_element_type(), ElementType::Untyped);
+    assert_match!(dict.value_element_type(), ElementType::ScriptClass(script));
+    let script = script.script().expect("script object should be alive");
+    assert_eq!(script, gdscript.upcast());
+    assert_eq!(
+        script.get_global_name(),
+        "CustomScriptForDictionaries".into()
+    );
 }

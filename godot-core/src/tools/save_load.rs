@@ -10,7 +10,7 @@ use crate::classes::{Resource, ResourceLoader, ResourceSaver};
 use crate::global::Error as GodotError;
 use crate::meta::error::IoError;
 use crate::meta::{arg_into_ref, AsArg};
-use crate::obj::{Gd, Inherits};
+use crate::obj::{Gd, Inherits, Singleton};
 
 /// ⚠️ Loads a resource from the filesystem located at `path`, panicking on error.
 ///
@@ -146,19 +146,19 @@ where
 {
     let loaded = ResourceLoader::singleton()
         .load_ex(path)
-        .type_hint(&T::class_name().to_gstring())
+        .type_hint(&T::class_id().to_gstring())
         .done();
 
     match loaded {
         Some(res) => match res.try_cast::<T>() {
             Ok(obj) => Ok(obj),
             Err(_) => Err(IoError::loading_cast(
-                T::class_name().to_string(),
+                T::class_id().to_string(),
                 path.to_string(),
             )),
         },
         None => Err(IoError::loading(
-            T::class_name().to_string(),
+            T::class_id().to_string(),
             path.to_string(),
         )),
     }
@@ -175,7 +175,7 @@ where
     } else {
         Err(IoError::saving(
             res,
-            T::class_name().to_string(),
+            T::class_id().to_string(),
             path.to_string(),
         ))
     }

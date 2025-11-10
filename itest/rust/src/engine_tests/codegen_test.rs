@@ -8,10 +8,11 @@
 // This file tests the presence, naming and accessibility of generated symbols.
 // Functionality is only tested on a superficial level (to make sure general FFI mechanisms work).
 
-use crate::framework::itest;
 use godot::builtin::inner::InnerColor;
-use godot::classes::{FileAccess, HttpRequest, IHttpRequest, Image};
+use godot::classes::{FileAccess, HttpRequest, IHttpRequest, RenderingServer};
 use godot::prelude::*;
+
+use crate::framework::itest;
 
 #[itest]
 fn codegen_class_renamed() {
@@ -53,15 +54,16 @@ fn codegen_static_class_method() {
 
 #[itest]
 fn codegen_constants() {
-    assert_eq!(Image::MAX_WIDTH, 16777216);
+    assert_eq!(RenderingServer::CANVAS_ITEM_Z_MIN, -4096);
+    //assert_eq!(Image::MAX_WIDTH, 16777216);
     // assert_eq!(Material::RENDER_PRIORITY_MIN, -128);
 }
 
 #[itest]
 fn cfg_test() {
-    // Makes sure that since_api and before_api are mutually exclusive
-    assert_ne!(cfg!(since_api = "4.2"), cfg!(before_api = "4.2"));
+    // Makes sure that since_api and before_api are mutually exclusive.
     assert_ne!(cfg!(since_api = "4.3"), cfg!(before_api = "4.3"));
+    assert_ne!(cfg!(since_api = "4.4"), cfg!(before_api = "4.4"));
 }
 
 #[derive(GodotClass)]
@@ -94,6 +96,12 @@ impl IHttpRequest for CodegenTest {
 
     // Test unnamed parameter in virtual function
     fn process(&mut self, _: f64) {}
+
+    // Test auto-cast to f32 parameter in virtual function
+    fn physics_process(&mut self, delta: f32) {
+        // Test it's actually f32 in the body.
+        let _use_param: f32 = delta;
+    }
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -135,7 +143,7 @@ impl CodegenTest2 {
 macro_rules! make_class {
     ($ClassName:ident, $BaseName:ident) => {
         #[derive(GodotClass)]
-        #[class(no_init, base=$BaseName)]
+        #[class(base=$BaseName)]
         pub struct $ClassName {
             base: Base<godot::classes::$BaseName>,
         }
@@ -182,4 +190,53 @@ trait TraitA {
 
 impl TraitA for CodegenTest3 {
     fn exit_tree(&mut self) {}
+}
+
+// Verifies that attributes (here #[expect]) are preserved by #[itest] macro.
+// See retain_attributes_except() function.
+#[itest]
+#[expect(unused_variables)]
+fn itest_macro_attribute_retention() {
+    let unused_var = 42; // Should not generate warning.
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Int->enum replacements
+
+// Tests both that code compiles, and that FFI does not break by replacement.
+#[cfg(feature = "codegen-full")]
+#[itest]
+fn changed_enum_apis() {
+    use godot::classes::file_access::ModeFlags;
+    use godot::classes::gpu_particles_2d::EmitFlags;
+    use godot::classes::tree::DropModeFlags;
+    use godot::classes::{FileAccess, GpuParticles2D, Tree};
+
+    use crate::framework::suppress_godot_print;
+
+    suppress_godot_print(|| {
+        // FileAccess::create_temp() with ModeFlags. Deliberately invalid prefix to not create an actual file.
+        let file = FileAccess::create_temp_ex(ModeFlags::READ)
+            .prefix("/invalid-prefix")
+            .done();
+        assert!(file.is_none());
+    });
+
+    // GPUParticles2D::emit_particle with EmitFlags.
+    let mut particles2d = GpuParticles2D::new_alloc();
+    particles2d.emit_particle(
+        Transform2D::IDENTITY,
+        Vector2::ZERO,
+        Color::RED,
+        Color::BLACK,
+        EmitFlags::POSITION | EmitFlags::ROTATION_SCALE,
+    );
+    particles2d.free();
+
+    // Tree::{set,get}_drop_mode_flags() with DropModeFlags.
+    let mut tree = Tree::new_alloc();
+    tree.set_drop_mode_flags(DropModeFlags::INBETWEEN);
+    let mode = tree.get_drop_mode_flags();
+    assert_eq!(mode, DropModeFlags::INBETWEEN);
+    tree.free();
 }

@@ -7,10 +7,13 @@
 
 #![cfg(feature = "register-docs")]
 
-use crate::framework::itest;
 use godot::prelude::*;
 
+use crate::framework::itest;
+
 /// *documented* ~ **documented** ~ [AABB] < [pr](https://github.com/godot-rust/gdext/pull/748)
+///
+/// @deprecated we will use normal integration tests with editor in the future.
 ///
 /// This is a paragraph. It has some text in it. It's a paragraph. It's quite
 /// long, and wraps multiple lines. It is describing the struct `Player`. Or
@@ -22,6 +25,12 @@ use godot::prelude::*;
 /// a few tests:
 ///
 /// headings:
+///
+/// @experimental both experimental
+/// and
+/// deprecated
+/// tags
+/// are **experimental**.
 ///
 /// # Some heading
 ///
@@ -149,6 +158,15 @@ pub struct FairlyDocumented {
     #[doc = r#"this is very documented"#]
     #[var]
     item: f32,
+    #[doc = "@deprecated use on your own risk!!"]
+    #[doc = ""]
+    #[doc = "not to be confused with B!"]
+    #[export]
+    a: i32,
+    /// Some docs…
+    /// @experimental idk.
+    #[export]
+    b: i64,
     /// is it documented?
     #[var]
     item_2: i64,
@@ -167,6 +185,8 @@ impl INode for FairlyDocumented {
     fn init(base: Base<Node>) -> Self {
         Self {
             base,
+            a: 22,
+            b: 44,
             item: 883.0,
             item_2: 25,
             item_xml: "".into(),
@@ -183,6 +203,16 @@ impl FairlyDocumented {
 
     #[constant]
     const PURPOSE: i64 = 42;
+
+    /// Hmmmm
+    /// @deprecated Did you know that constants can be deprecated?
+    #[constant]
+    const A: i64 = 128;
+
+    /// Who would know that!
+    /// @experimental Did you know that constants can be experimental?
+    #[constant]
+    const B: i64 = 128;
 
     /// this docstring has < a special character
     #[constant]
@@ -228,6 +258,24 @@ impl FairlyDocumented {
         panic!()
     }
 
+    /// This is a method.
+    /// @experimental might explode on use
+    /// …maybe?
+    ///
+    /// Who knows
+    #[func]
+    fn experimental_method() {}
+
+    /// @deprecated EXPLODES ON USE
+    /// DO NOT USE
+    ///
+    /// ?????
+    /// @experimental somebody probably uses it??
+    ///
+    /// probably
+    #[func]
+    fn deprecated_method() {}
+
     #[signal]
     fn undocumented_signal(p: Vector3, w: f64);
 
@@ -238,17 +286,79 @@ impl FairlyDocumented {
     /// The `Gd<Node>` param should be properly escaped
     #[signal]
     fn documented_signal(p: Vector3, w: f64, node: Gd<Node>);
+
+    /// My signal
+    ///
+    /// @deprecated – use other_signal instead.
+    ///
+    /// huh?!
+    #[signal]
+    fn deprecated(x: i64);
+
+    /// New signal
+    ///
+    /// @experimental this is new signal
+    /// use it at your own risk
+    ///
+    /// fr.
+    #[signal]
+    fn other_signal(x: i64);
+}
+
+#[godot_api(secondary)]
+impl FairlyDocumented {
+    /// Documented method in godot_api secondary block
+    #[func]
+    fn secondary_but_documented(&self, _smth: i64) {}
+}
+
+#[godot_api(secondary)]
+impl FairlyDocumented {
+    /// Documented method in other godot_api secondary block
+    #[func]
+    fn tertiary_but_documented(&self, _smth: i64) {}
 }
 
 #[itest]
 fn test_register_docs() {
-    let xml = find_class_docs("FairlyDocumented");
+    let actual_xml = find_class_docs("FairlyDocumented");
 
     // Uncomment if implementation changes and expected output file should be rewritten.
     // std::fs::write("../rust/src/register_tests/res/registered_docs.xml", &xml)
     //     .expect("failed to write docs XML file");
 
-    assert_eq!(include_str!("res/registered_docs.xml"), xml);
+    let expected_xml = include_str!("res/registered_docs.xml");
+
+    if actual_xml == expected_xml {
+        return; // All good.
+    }
+
+    // In GitHub Actions, print output of expected vs. actual.
+    if crate::framework::runs_github_ci() {
+        panic!(
+            "Registered docs XML does not match expected output.\
+            \n============================================================\
+            \nExpected:\n\n{expected_xml}\n\
+            \n------------------------------------------------------------\
+            \nActual:\n\n{actual_xml}\n\
+            \n============================================================\n"
+        );
+    }
+
+    // Locally, write to a file for manual inspection/diffing.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("register_tests")
+        .join("res")
+        .join("actual_registered_docs.xml");
+
+    std::fs::write(&path, &actual_xml).expect("write `actual_registered_docs.xml` failed");
+
+    panic!(
+        "Registered docs XML does not match expected output.\n\
+        Actual output has been written to following file:\n  {path}\n",
+        path = path.display()
+    );
 }
 
 fn find_class_docs(class_name: &str) -> String {

@@ -7,9 +7,10 @@
 
 //! Type and expression conversions (Godot -> Rust)
 
+use std::fmt;
+
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{quote, ToTokens};
-use std::fmt;
 
 use crate::context::Context;
 use crate::conv;
@@ -66,7 +67,11 @@ fn to_hardcoded_rust_ident(full_ty: &GodotTy) -> Option<&str> {
         ("real_t", None) => "real",
         ("void", None) => "c_void",
 
-        (ty, Some(meta)) => panic!("unhandled type {ty:?} with meta {meta:?}"),
+        // meta="required" is a special case of non-null object parameters/return types.
+        // Other metas are unrecognized.
+        (ty, Some(meta)) if meta != "required" => {
+            panic!("unhandled type {ty:?} with meta {meta:?}")
+        }
 
         _ => return None,
     };
@@ -169,6 +174,18 @@ fn to_rust_type_uncached(full_ty: &GodotTy, ctx: &mut Context) -> RustTy {
             ty = ty.replace("const ", "");
         }
 
+        // Sys pointer type defined in `gdextension_interface` and used as param for given method, e.g. `GDExtensionInitializationFunction`.
+        // Note: we branch here to avoid clashes with actual GDExtension classes.
+        if ty.starts_with("GDExtension") {
+            let ty = rustify_ty(&ty);
+            return RustTy::RawPointer {
+                inner: Box::new(RustTy::SysPointerType {
+                    tokens: quote! { sys::#ty },
+                }),
+                is_const,
+            };
+        }
+
         // .trim() is necessary here, as Godot places a space between a type and the stars when representing a double pointer.
         // Example: "int*" but "int **".
         let inner_type = to_rust_type(ty.trim(), None, ctx);
@@ -215,8 +232,11 @@ fn to_rust_type_uncached(full_ty: &GodotTy, ctx: &mut Context) -> RustTy {
                 elem_type: quote! { Array<#rust_elem_ty> },
             }
         } else {
+            // In Array, store Gd and not Option<Gd> elements.
+            let without_option = rust_elem_ty.tokens_non_null();
+
             RustTy::EngineArray {
-                tokens: quote! { Array<#rust_elem_ty> },
+                tokens: quote! { Array<#without_option> },
                 elem_class: elem_ty.to_string(),
             }
         };
@@ -231,14 +251,30 @@ fn to_rust_type_uncached(full_ty: &GodotTy, ctx: &mut Context) -> RustTy {
             arg_passing: ctx.get_builtin_arg_passing(full_ty),
         }
     } else {
-        let ty = rustify_ty(ty);
-        let qualified_class = quote! { crate::classes::#ty };
+        let is_nullable = if cfg!(feature = "experimental-required-objs") {
+            full_ty.meta.as_ref().is_none_or(|m| m != "required")
+        } else {
+            true
+        };
+
+        let inner_class = rustify_ty(ty);
+        let qualified_class = quote! { crate::classes::#inner_class };
+
+        // Stores unwrapped Gd<T> directly in `gd_tokens`.
+        let gd_tokens = quote! { Gd<#qualified_class> };
+
+        // Use Option for `impl_as_object_arg` if nullable.
+        let impl_as_object_arg = if is_nullable {
+            quote! { impl AsArg<Option<Gd<#qualified_class>>> }
+        } else {
+            quote! { impl AsArg<Gd<#qualified_class>> }
+        };
 
         RustTy::EngineClass {
-            tokens: quote! { Gd<#qualified_class> },
-            object_arg: quote! { ObjectArg<#qualified_class> },
-            impl_as_object_arg: quote! { impl AsObjectArg<#qualified_class> },
-            inner_class: ty,
+            gd_tokens,
+            impl_as_object_arg,
+            inner_class,
+            is_nullable,
         }
     }
 }
@@ -249,15 +285,11 @@ fn to_rust_type_uncached(full_ty: &GodotTy, ctx: &mut Context) -> RustTy {
 /// I.e. just `Mesh.ArrayFormat` or `Error`.
 pub(crate) fn to_enum_type_uncached(enum_or_bitfield: &str, is_bitfield: bool) -> RustTy {
     if let Some((class, enum_)) = enum_or_bitfield.split_once('.') {
-        // Class-local enum or bitfield.
-        let module = ModName::from_godot(class);
-        let enum_or_bitfield_name = conv::make_enum_name(enum_);
-
-        RustTy::EngineEnum {
-            tokens: quote! { crate::classes::#module::#enum_or_bitfield_name },
-            surrounding_class: Some(class.to_string()),
-            is_bitfield,
-        }
+        to_class_enum_uncached(class, enum_, is_bitfield)
+    } else if enum_or_bitfield == "ResourceDeepDuplicateMode" {
+        // FIXME – in https://github.com/godotengine/godot/pull/100673#issuecomment-2916116489 `ResourceDeepDuplicateMode` has been wrongly marked as an Engine Enum.
+        // Remove this workaround after the fix appears.
+        to_class_enum_uncached("Resource", enum_or_bitfield, is_bitfield)
     } else {
         // Global enum or bitfield.
         let enum_or_bitfield_name = conv::make_enum_name(enum_or_bitfield);
@@ -267,6 +299,18 @@ pub(crate) fn to_enum_type_uncached(enum_or_bitfield: &str, is_bitfield: bool) -
             surrounding_class: None,
             is_bitfield,
         }
+    }
+}
+
+fn to_class_enum_uncached(class: &str, enum_: &str, is_bitfield: bool) -> RustTy {
+    // Class-local enum or bitfield.
+    let module = ModName::from_godot(class);
+    let enum_or_bitfield_name = conv::make_enum_name(enum_);
+
+    RustTy::EngineEnum {
+        tokens: quote! { crate::classes::#module::#enum_or_bitfield_name },
+        surrounding_class: Some(class.to_string()),
+        is_bitfield,
     }
 }
 
@@ -300,8 +344,7 @@ fn to_rust_expr_inner(expr: &str, ty: &RustTy, is_inner: bool) -> TokenStream {
                 _ => panic!("null not representable in target type {ty:?}"),
             }
         }
-        // empty string appears only for Callable/Rid in 4.0; default ctor syntax in 4.1+
-        "" | "RID()" | "Callable()" if !is_inner => {
+        "RID()" | "Callable()" if !is_inner => {
             return match ty {
                 RustTy::BuiltinIdent { ty: ident, .. } if ident == "Rid" => quote! { Rid::Invalid },
                 RustTy::BuiltinIdent { ty: ident, .. } if ident == "Callable" => {

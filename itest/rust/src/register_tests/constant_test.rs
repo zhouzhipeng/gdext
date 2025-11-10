@@ -8,10 +8,12 @@
 // Needed for Clippy to accept #[cfg(all())]
 #![allow(clippy::non_minimal_cfg)]
 
-use crate::framework::itest;
 use godot::classes::ClassDb;
+use godot::obj::Singleton;
 use godot::prelude::*;
 use godot::sys::static_assert;
+
+use crate::framework::itest;
 
 #[derive(GodotClass)]
 #[class(no_init)]
@@ -67,7 +69,7 @@ impl HasConstants {
 
 /// Checks at runtime if a class has a given integer constant through [ClassDb].
 fn class_has_integer_constant<T: GodotClass>(name: &str) -> bool {
-    ClassDb::singleton().class_has_integer_constant(&T::class_name().to_string_name(), name)
+    ClassDb::singleton().class_has_integer_constant(&T::class_id().to_string_name(), name)
 }
 
 #[itest]
@@ -83,7 +85,7 @@ fn constants_correct_value() {
         ),
     ];
 
-    let class_name = HasConstants::class_name().to_string_name();
+    let class_name = HasConstants::class_id().to_string_name();
     let constants = ClassDb::singleton()
         .class_get_integer_constant_list_ex(&class_name)
         .no_inheritance(true)
@@ -136,7 +138,7 @@ impl godot::obj::cap::ImplementsGodotApi for HasOtherConstants {
         use ::godot::register::private::constant::*;
         // Try exporting an enum.
         ExportConstant::new(
-            HasOtherConstants::class_name(),
+            HasOtherConstants::class_id(),
             ConstantKind::Enum {
                 name: Self::ENUM_NAME.into(),
                 enumerators: vec![
@@ -150,7 +152,7 @@ impl godot::obj::cap::ImplementsGodotApi for HasOtherConstants {
 
         // Try exporting an enum.
         ExportConstant::new(
-            HasOtherConstants::class_name(),
+            HasOtherConstants::class_id(),
             ConstantKind::Bitfield {
                 name: Self::BITFIELD_NAME.into(),
                 flags: vec![
@@ -170,8 +172,6 @@ godot::sys::plugin_add!(
     godot::private::ClassPlugin::new::<HasOtherConstants>(
         godot::private::PluginItem::InherentImpl(
             godot::private::InherentImpl::new::<HasOtherConstants>(
-                #[cfg(feature = "register-docs")]
-                Default::default()
             )
         )
     )
@@ -180,13 +180,13 @@ godot::sys::plugin_add!(
 macro_rules! test_enum_export {
     (
         $class:ty, $enum_name:ident, [$($enumerators:ident),* $(,)?];
-        // Include the `attr` here to, so we can easily do things like `#[itest(focus)]`.
+        // Include the `attr` here too, so we can easily do things like `#[itest (focus)]`.
         #$attr:tt
         fn $test_name:ident() { .. }
     ) => {
         #$attr
         fn $test_name() {
-            let class_name = <$class>::class_name().to_string_name();
+            let class_name = <$class>::class_id().to_string_name();
             let enum_name = StringName::from(<$class>::$enum_name);
             let variants = [
                 $((stringify!($enumerators), <$class>::$enumerators)),*

@@ -5,13 +5,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use proc_macro2::{Ident, TokenStream};
+use quote::{format_ident, quote, ToTokens};
+
 use crate::context::Context;
 use crate::conv;
+use crate::generator::sys_pointer_types::make_godotconvert_for_systypes;
 use crate::generator::{enums, gdext_build_struct};
 use crate::models::domain::ExtensionApi;
 use crate::util::ident;
-use proc_macro2::{Ident, TokenStream};
-use quote::{format_ident, quote, ToTokens};
 
 pub fn make_sys_central_code(api: &ExtensionApi) -> TokenStream {
     let build_config_struct = gdext_build_struct::make_gdext_build_struct(&api.godot_version);
@@ -37,6 +39,7 @@ pub fn make_sys_central_code(api: &ExtensionApi) -> TokenStream {
             // This will need refactoring if VariantType is changed to a real enum.
             #[doc(hidden)]
             pub fn from_sys(enumerator: crate::GDExtensionVariantType) -> Self {
+                #[allow(clippy::unnecessary_cast)] // on Windows already i32.
                 Self { ord: enumerator as i32 }
             }
 
@@ -58,6 +61,7 @@ pub fn make_core_central_code(api: &ExtensionApi, ctx: &mut Context) -> TokenStr
 
     let (global_enum_defs, global_reexported_enum_defs) = make_global_enums(api);
     let variant_type_traits = make_variant_type_enum(api, false);
+    let sys_types_godotconvert_impl = make_godotconvert_for_systypes(ctx);
 
     // TODO impl Clone, Debug, PartialEq, PartialOrd, Hash for VariantDispatch
     // TODO could use try_to().unwrap_unchecked(), since type is already verified. Also directly overload from_variant().
@@ -118,6 +122,11 @@ pub fn make_core_central_code(api: &ExtensionApi, ctx: &mut Context) -> TokenStr
        pub mod global_reexported_enums {
             use crate::sys;
             #( #global_reexported_enum_defs )*
+        }
+
+        pub mod sys_pointer_types {
+            use crate::sys;
+            #( #sys_types_godotconvert_impl )*
         }
     }
 }

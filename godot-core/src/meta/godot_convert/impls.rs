@@ -5,14 +5,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use godot_ffi as sys;
+
 use crate::builtin::{Array, Variant};
+use crate::meta;
 use crate::meta::error::{ConvertError, ErrorKind, FromFfiError, FromVariantError};
 use crate::meta::{
-    ArrayElement, ClassName, FromGodot, GodotConvert, GodotNullableFfi, GodotType,
-    PropertyHintInfo, PropertyInfo, ToGodot,
+    ArrayElement, ClassId, FromGodot, GodotConvert, GodotNullableFfi, GodotType, PropertyHintInfo,
+    PropertyInfo, ToGodot,
 };
 use crate::registry::method::MethodParamOrReturnInfo;
-use godot_ffi as sys;
 
 // The following ToGodot/FromGodot/Convert impls are auto-generated for each engine type, co-located with their definitions:
 // - enum
@@ -59,8 +61,8 @@ where
         T::param_metadata()
     }
 
-    fn class_name() -> ClassName {
-        T::class_name()
+    fn class_id() -> ClassId {
+        T::class_id()
     }
 
     fn property_info(property_name: &str) -> PropertyInfo {
@@ -82,32 +84,50 @@ where
     fn godot_type_name() -> String {
         T::godot_type_name()
     }
+
+    // Only relevant for object types T.
+    fn as_object_arg(&self) -> meta::ObjectArg<'_> {
+        match self {
+            Some(inner) => inner.as_object_arg(),
+            None => meta::ObjectArg::null(),
+        }
+    }
 }
 
-impl<T: GodotConvert> GodotConvert for Option<T>
+impl<T> GodotConvert for Option<T>
 where
+    T: GodotConvert,
     Option<T::Via>: GodotType,
 {
     type Via = Option<T::Via>;
 }
 
-impl<T: ToGodot> ToGodot for Option<T>
+impl<T> ToGodot for Option<T>
 where
-    Option<T::Via>: GodotType,
-    for<'v, 'f> T::ToVia<'v>: GodotType<
+    // Currently limited to holding objects -> needed to establish to_godot() relation T::to_godot() = Option<&T::Via>.
+    T: ToGodot<Pass = meta::ByObject>,
+    // Extra Clone bound for to_godot_owned(); might be extracted in the future.
+    T::Via: Clone,
+    // T::Via must be a Godot nullable type (to support the None case).
+    for<'f> T::Via: GodotType<
         // Associated types need to be nullable.
         Ffi: GodotNullableFfi,
         ToFfi<'f>: GodotNullableFfi,
     >,
+    // Previously used bound, not needed right now but don't remove: Option<T::Via>: GodotType,
 {
-    type ToVia<'v>
-        = Option<T::ToVia<'v>>
-    // type ToVia<'v> = Self::Via
-    where
-        Self: 'v;
+    // Basically ByRef, but allows Option<T> -> Option<&T::Via> conversion.
+    type Pass = meta::ByOption<T::Via>;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
-        self.as_ref().map(ToGodot::to_godot)
+    fn to_godot(&self) -> Option<&T::Via> {
+        self.as_ref().map(T::to_godot)
+    }
+
+    fn to_godot_owned(&self) -> Option<T::Via>
+    where
+        Self::Via: Clone,
+    {
+        self.as_ref().map(T::to_godot_owned)
     }
 
     fn to_variant(&self) -> Variant {
@@ -188,7 +208,7 @@ macro_rules! impl_godot_scalar {
         // For integer types, we can validate the conversion.
         impl ArrayElement for $T {
             fn debug_validate_elements(array: &Array<Self>) -> Result<(), ConvertError> {
-                array.debug_validate_elements()
+                array.debug_validate_int_elements()
             }
         }
 
@@ -237,9 +257,9 @@ macro_rules! impl_godot_scalar {
         }
 
         impl ToGodot for $T {
-            type ToVia<'v> = Self::Via;
+            type Pass = meta::ByValue;
 
-            fn to_godot(&self) -> Self::ToVia<'_> {
+            fn to_godot(&self) -> Self::Via {
                *self
             }
         }
@@ -249,16 +269,14 @@ macro_rules! impl_godot_scalar {
                 Ok(via)
             }
         }
-
-        $crate::impl_asarg_by_value!($T);
     };
 }
 
 // `GodotType` for these three is implemented in `godot-core/src/builtin/variant/impls.rs`.
-crate::meta::impl_godot_as_self!(bool);
-crate::meta::impl_godot_as_self!(i64);
-crate::meta::impl_godot_as_self!(f64);
-crate::meta::impl_godot_as_self!(());
+meta::impl_godot_as_self!(bool: ByValue);
+meta::impl_godot_as_self!(i64: ByValue);
+meta::impl_godot_as_self!(f64: ByValue);
+meta::impl_godot_as_self!((): ByValue);
 
 // Also implements ArrayElement.
 impl_godot_scalar!(
@@ -325,9 +343,9 @@ impl GodotConvert for u64 {
 }
 
 impl ToGodot for u64 {
-    type ToVia<'v> = u64;
+    type Pass = meta::ByValue;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
+    fn to_godot(&self) -> Self::Via {
         *self
     }
 
@@ -336,7 +354,7 @@ impl ToGodot for u64 {
         i64::try_from(*self)
             .map(|v| v.to_variant())
             .unwrap_or_else(|_| {
-                panic!("to_variant(): u64 value {} is not representable inside Variant, which can only store i64 integers", self)
+                panic!("to_variant(): u64 value {self} is not representable inside Variant, which can only store i64 integers")
             })
     }
 }
@@ -360,32 +378,32 @@ impl FromGodot for u64 {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Collections
 
-// impl<T: ArrayElement> GodotConvert for Vec<T> {
-//     type Via = Array<T>;
-// }
-//
-// impl<T: ArrayElement> ToGodot for Vec<T> {
-//     type ToVia<'v> = Array<T>;
-//
-//     fn to_godot(&self) -> Self::ToVia<'_> {
-//         Array::from(self.as_slice())
-//     }
-// }
-//
-// impl<T: ArrayElement> FromGodot for Vec<T> {
-//     fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
-//         Ok(via.iter_shared().collect())
-//     }
-// }
+impl<T: ArrayElement> GodotConvert for Vec<T> {
+    type Via = Array<T>;
+}
+
+impl<T: ArrayElement> ToGodot for Vec<T> {
+    type Pass = meta::ByValue;
+
+    fn to_godot(&self) -> Self::Via {
+        Array::from(self.as_slice())
+    }
+}
+
+impl<T: ArrayElement> FromGodot for Vec<T> {
+    fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
+        Ok(via.iter_shared().collect())
+    }
+}
 
 impl<T: ArrayElement, const LEN: usize> GodotConvert for [T; LEN] {
     type Via = Array<T>;
 }
 
 impl<T: ArrayElement, const LEN: usize> ToGodot for [T; LEN] {
-    type ToVia<'v> = Array<T>;
+    type Pass = meta::ByValue;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
+    fn to_godot(&self) -> Self::Via {
         Array::from(self)
     }
 }
@@ -423,12 +441,9 @@ impl<T: ArrayElement> GodotConvert for &[T] {
 }
 
 impl<T: ArrayElement> ToGodot for &[T] {
-    type ToVia<'v>
-        = Array<T>
-    where
-        Self: 'v;
+    type Pass = meta::ByValue;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
+    fn to_godot(&self) -> Self::Via {
         Array::from(*self)
     }
 }
@@ -447,9 +462,9 @@ macro_rules! impl_pointer_convert {
         }
 
         impl ToGodot for $Ptr {
-            type ToVia<'v> = i64;
+            type Pass = meta::ByValue;
 
-            fn to_godot(&self) -> Self::ToVia<'_> {
+            fn to_godot(&self) -> Self::Via {
                 *self as i64
             }
         }

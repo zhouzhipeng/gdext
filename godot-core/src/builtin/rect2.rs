@@ -6,7 +6,7 @@
  */
 
 use godot_ffi as sys;
-use sys::{ffi_methods, GodotFfi};
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
 
 use crate::builtin::math::ApproxEq;
 use crate::builtin::{real, Rect2i, Side, Vector2};
@@ -27,8 +27,11 @@ use crate::builtin::{real, Rect2i, Side, Vector2};
 ///
 /// [`Aabb`]: crate::builtin::Aabb
 ///
-/// # Godot docs
+/// # Soft invariants
+/// `Rect2` requires non-negative size for certain operations, which is validated only on a best-effort basis. Violations may
+/// cause panics in Debug mode. See also [_Builtin API design_](../__docs/index.html#6-public-fields-and-soft-invariants).
 ///
+/// # Godot docs
 /// [`Rect2` (stable)](https://docs.godotengine.org/en/stable/classes/class_rect2.html)
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -63,12 +66,6 @@ impl Rect2 {
             position: Vector2::new(x, y),
             size: Vector2::new(width, height),
         }
-    }
-
-    #[deprecated = "Moved to `Rect2i::cast_float()`"]
-    #[inline]
-    pub const fn from_rect2i(rect: Rect2i) -> Self {
-        rect.cast_float()
     }
 
     /// Create a new `Rect2i` from a `Rect2`, using `as` for `real` to `i32` conversions.
@@ -190,12 +187,6 @@ impl Rect2 {
         point.abs() == point && point.x < self.size.x && point.y < self.size.y
     }
 
-    #[inline]
-    #[deprecated = "Renamed to `contains_point()`, for consistency with `Rect2i`"]
-    pub fn has_point(self, point: Vector2) -> bool {
-        self.contains_point(point)
-    }
-
     /// Returns the intersection of this Rect2 and `b`. If the rectangles do not intersect, an empty Rect2 is returned.
     #[inline]
     pub fn intersect(self, b: Self) -> Option<Self> {
@@ -211,11 +202,6 @@ impl Rect2 {
         rect.size = end.coord_min(end_b) - rect.position;
 
         Some(rect)
-    }
-
-    #[deprecated = "Renamed to `intersect()`"]
-    pub fn intersection(self, b: Rect2) -> Option<Self> {
-        self.intersect(b)
     }
 
     /// Checks whether two rectangles have at least one point in common.
@@ -286,14 +272,12 @@ impl Rect2 {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Rect2 {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::RECT2
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::RECT2);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(Rect2);
+crate::meta::impl_godot_as_self!(Rect2: ByValue);
 
 impl ApproxEq for Rect2 {
     /// Returns if the two `Rect2`s are approximately equal, by comparing `position` and `size` separately.

@@ -5,20 +5,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use godot_ffi::join_with;
 use std::collections::HashMap;
 use std::{any, ptr};
 
+use godot_ffi::join_with;
+use sys::{interface_fn, out, Global, GlobalGuard, GlobalLockError};
+
 use crate::classes::ClassDb;
 use crate::init::InitLevel;
-use crate::meta::error::{ConvertError, FromGodotError};
-use crate::meta::ClassName;
-use crate::obj::{cap, DynGd, Gd, GodotClass};
+use crate::meta::error::FromGodotError;
+use crate::meta::ClassId;
+use crate::obj::{cap, DynGd, Gd, GodotClass, Singleton};
 use crate::private::{ClassPlugin, PluginItem};
 use crate::registry::callbacks;
 use crate::registry::plugin::{DynTraitImpl, ErasedRegisterFn, ITraitImpl, InherentImpl, Struct};
 use crate::{classes, godot_error, godot_warn, sys};
-use sys::{interface_fn, out, Global, GlobalGuard, GlobalLockError};
 
 /// Returns a lock to a global map of loaded classes, by initialization level.
 ///
@@ -39,8 +40,8 @@ fn global_loaded_classes_by_init_level(
 ///
 /// Complementary mechanism to the on-registration hooks like `__register_methods()`. This is used for runtime queries about a class, for
 /// information which isn't stored in Godot. Example: list related `dyn Trait` implementations.
-fn global_loaded_classes_by_name() -> GlobalGuard<'static, HashMap<ClassName, ClassMetadata>> {
-    static LOADED_CLASSES_BY_NAME: Global<HashMap<ClassName, ClassMetadata>> = Global::default();
+fn global_loaded_classes_by_name() -> GlobalGuard<'static, HashMap<ClassId, ClassMetadata>> {
+    static LOADED_CLASSES_BY_NAME: Global<HashMap<ClassId, ClassMetadata>> = Global::default();
 
     lock_or_panic(&LOADED_CLASSES_BY_NAME, "loaded classes (by name)")
 }
@@ -58,7 +59,7 @@ fn global_dyn_traits_by_typeid() -> GlobalGuard<'static, HashMap<any::TypeId, Ve
 ///
 /// Besides the name, this type holds information relevant for the deregistration of the class.
 pub struct LoadedClass {
-    name: ClassName,
+    name: ClassId,
     is_editor_plugin: bool,
 }
 
@@ -70,9 +71,7 @@ pub struct ClassMetadata {}
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
 // This works as long as fields are called the same. May still need individual #[cfg]s for newer fields.
-#[cfg(before_api = "4.2")]
-type GodotCreationInfo = sys::GDExtensionClassCreationInfo;
-#[cfg(all(since_api = "4.2", before_api = "4.3"))]
+#[cfg(before_api = "4.3")]
 type GodotCreationInfo = sys::GDExtensionClassCreationInfo2;
 #[cfg(all(since_api = "4.3", before_api = "4.4"))]
 type GodotCreationInfo = sys::GDExtensionClassCreationInfo3;
@@ -86,8 +85,8 @@ pub(crate) type GodotGetVirtual = <sys::GDExtensionClassGetVirtual2 as sys::Inne
 
 #[derive(Debug)]
 struct ClassRegistrationInfo {
-    class_name: ClassName,
-    parent_class_name: Option<ClassName>,
+    class_name: ClassId,
+    parent_class_name: Option<ClassId>,
     // Following functions are stored separately, since their order matters.
     register_methods_constants_fn: Option<ErasedRegisterFn>,
     register_properties_fn: Option<ErasedRegisterFn>,
@@ -136,8 +135,8 @@ impl ClassRegistrationInfo {
 }
 
 /// Registers a class with static type information.
-// Currently dead code, but will be needed for builder API. Don't remove.
-pub fn register_class<
+#[expect(dead_code)] // Will be needed for builder API. Don't remove.
+pub(crate) fn register_class<
     T: cap::GodotDefault
         + cap::ImplementsGodotVirtual
         + cap::GodotToString
@@ -162,13 +161,13 @@ pub fn register_class<
     };
 
     assert!(
-        !T::class_name().is_none(),
+        !T::class_id().is_none(),
         "cannot register () or unnamed class"
     );
 
     register_class_raw(ClassRegistrationInfo {
-        class_name: T::class_name(),
-        parent_class_name: Some(T::Base::class_name()),
+        class_name: T::class_id(),
+        parent_class_name: Some(T::Base::class_id()),
         register_methods_constants_fn: None,
         register_properties_fn: None,
         user_register_fn: Some(ErasedRegisterFn {
@@ -192,7 +191,7 @@ pub fn auto_register_classes(init_level: InitLevel) {
     // * missing #[derive(GodotClass)] or impl GodotClass for T
     // * duplicate impl GodotDefault for T
     //
-    let mut map = HashMap::<ClassName, ClassRegistrationInfo>::new();
+    let mut map = HashMap::<ClassId, ClassRegistrationInfo>::new();
 
     crate::private::iterate_plugins(|elem: &ClassPlugin| {
         // Filter per ClassPlugin and not PluginItem, because all components of all classes are mixed together in one huge list.
@@ -216,17 +215,37 @@ pub fn auto_register_classes(init_level: InitLevel) {
     // but it is much slower and doesn't guarantee that all the dependent classes will be already loaded in most cases.
     register_classes_and_dyn_traits(&mut map, init_level);
 
-    // actually register all the classes
+    // Editor plugins should be added to the editor AFTER all the classes has been registered.
+    // Adding EditorPlugin to the Editor before registering all the classes it depends on might result in crash.
+    let mut editor_plugins: Vec<ClassId> = Vec::new();
+
+    // Actually register all the classes.
     for info in map.into_values() {
+        #[cfg(feature = "debug-log")]
+        let class_name = info.class_name;
+
+        if info.is_editor_plugin {
+            editor_plugins.push(info.class_name);
+        }
+
         register_class_raw(info);
+
         out!("Class {class_name} loaded.");
+    }
+
+    // Will imminently add given class to the editor.
+    // It is expected and beneficial behaviour while we load library for the first time
+    // but (for now) might lead to some issues during hot reload.
+    // See also: (https://github.com/godot-rust/gdext/issues/1132)
+    for editor_plugin_class_name in editor_plugins {
+        unsafe { interface_fn!(editor_add_plugin)(editor_plugin_class_name.string_sys()) };
     }
 
     out!("All classes for level `{init_level:?}` auto-registered.");
 }
 
 fn register_classes_and_dyn_traits(
-    map: &mut HashMap<ClassName, ClassRegistrationInfo>,
+    map: &mut HashMap<ClassId, ClassRegistrationInfo>,
     init_level: InitLevel,
 ) {
     let mut loaded_classes_by_level = global_loaded_classes_by_init_level();
@@ -288,7 +307,7 @@ pub fn auto_register_rpcs<T: GodotClass>(object: &mut T) {
     if let Some(InherentImpl {
         register_rpcs_fn: Some(closure),
         ..
-    }) = crate::private::find_inherent_impl(T::class_name())
+    }) = crate::private::find_inherent_impl(T::class_id())
     {
         (closure.raw)(object);
     }
@@ -304,14 +323,14 @@ pub fn auto_register_rpcs<T: GodotClass>(object: &mut T) {
 /// lifted, but would need quite a bit of extra machinery to work.
 pub(crate) fn try_dynify_object<T: GodotClass, D: ?Sized + 'static>(
     mut object: Gd<T>,
-) -> Result<DynGd<T, D>, ConvertError> {
+) -> Result<DynGd<T, D>, (FromGodotError, Gd<T>)> {
     let typeid = any::TypeId::of::<D>();
     let trait_name = sys::short_type_name::<D>();
 
     // Iterate all classes that implement the trait.
     let dyn_traits_by_typeid = global_dyn_traits_by_typeid();
     let Some(relations) = dyn_traits_by_typeid.get(&typeid) else {
-        return Err(FromGodotError::UnregisteredDynTrait { trait_name }.into_error(object));
+        return Err((FromGodotError::UnregisteredDynTrait { trait_name }, object));
     };
 
     // TODO maybe use 2nd hashmap instead of linear search.
@@ -328,7 +347,7 @@ pub(crate) fn try_dynify_object<T: GodotClass, D: ?Sized + 'static>(
         class_name: object.dynamic_class_string().to_string(),
     };
 
-    Err(error.into_error(object))
+    Err((error, object))
 }
 
 /// Responsible for creating hint_string for [`DynGd<T, D>`][crate::obj::DynGd] properties which works with [`PropertyHint::NODE_TYPE`][crate::global::PropertyHint::NODE_TYPE] or [`PropertyHint::RESOURCE_TYPE`][crate::global::PropertyHint::RESOURCE_TYPE].
@@ -345,7 +364,7 @@ where
 {
     // Exporting multiple node types is not supported.
     if T::inherits::<classes::Node>() {
-        return T::class_name().to_string();
+        return T::class_id().to_string();
     }
 
     let typeid = any::TypeId::of::<D>();
@@ -370,10 +389,10 @@ where
     // For example – don't include Nodes or Objects while creating hint_string for Resource.
     let relations_iter = relations.iter().filter_map(|implementor| {
         // TODO – check if caching it (using is_derived_base_cached) yields any benefits.
-        if implementor.parent_class_name? == T::class_name()
+        if implementor.parent_class_name? == T::class_id()
             || ClassDb::singleton().is_parent_class(
                 &implementor.parent_class_name?.to_string_name(),
-                &T::class_name().to_string_name(),
+                &T::class_id().to_string_name(),
             )
         {
             Some(implementor)
@@ -405,8 +424,8 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             is_editor_plugin,
             is_internal,
             is_instantiable,
-            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
-                docs: _,
+            reference_fn,
+            unreference_fn,
         }) => {
             c.parent_class_name = Some(base_class_name);
             c.default_virtual_fn = default_get_virtual_fn;
@@ -423,6 +442,8 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             // See also: https://github.com/godotengine/godot/pull/58972
             c.godot_params.is_abstract = sys::conv::bool_to_sys(!is_instantiable);
             c.godot_params.free_instance_func = Some(free_fn);
+            c.godot_params.reference_func = reference_fn;
+            c.godot_params.unreference_func = unreference_fn;
 
             fill_into(
                 &mut c.godot_params.create_instance_func,
@@ -430,21 +451,13 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             )
             .expect("duplicate: create_instance_func (def)");
 
-            #[cfg(before_api = "4.2")]
-            let _ = is_internal; // mark used
-            #[cfg(since_api = "4.2")]
-            {
-                fill_into(
-                    &mut c.godot_params.recreate_instance_func,
-                    generated_recreate_fn,
-                )
-                .expect("duplicate: recreate_instance_func (def)");
+            fill_into(
+                &mut c.godot_params.recreate_instance_func,
+                generated_recreate_fn,
+            )
+            .expect("duplicate: recreate_instance_func (def)");
 
-                c.godot_params.is_exposed = sys::conv::bool_to_sys(!is_internal);
-            }
-
-            #[cfg(before_api = "4.2")]
-            assert!(generated_recreate_fn.is_none()); // not used
+            c.godot_params.is_exposed = sys::conv::bool_to_sys(!is_internal);
 
             #[cfg(before_api = "4.3")]
             let _ = is_tool; // mark used
@@ -458,8 +471,6 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
         PluginItem::InherentImpl(InherentImpl {
             register_methods_constants_fn,
             register_rpcs_fn: _,
-            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
-                docs: _,
         }) => {
             c.register_methods_constants_fn = Some(register_methods_constants_fn);
         }
@@ -477,9 +488,6 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             user_free_property_list_fn,
             user_property_can_revert_fn,
             user_property_get_revert_fn,
-            #[cfg(all(since_api = "4.3", feature = "register-docs"))]
-                virtual_method_docs: _,
-            #[cfg(since_api = "4.2")]
             validate_property_fn,
         }) => {
             c.user_register_fn = user_register_fn;
@@ -490,12 +498,8 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             fill_into(&mut c.godot_params.create_instance_func, user_create_fn)
                 .expect("duplicate: create_instance_func (i)");
 
-            #[cfg(since_api = "4.2")]
             fill_into(&mut c.godot_params.recreate_instance_func, user_recreate_fn)
                 .expect("duplicate: recreate_instance_func (i)");
-
-            #[cfg(before_api = "4.2")]
-            assert!(user_recreate_fn.is_none()); // not used
 
             c.godot_params.to_string_func = user_to_string_fn;
             c.godot_params.notification_func = user_on_notification_fn;
@@ -506,7 +510,6 @@ fn fill_class_info(item: PluginItem, c: &mut ClassRegistrationInfo) {
             c.godot_params.property_can_revert_func = user_property_can_revert_fn;
             c.godot_params.property_get_revert_func = user_property_get_revert_fn;
             c.user_virtual_fn = get_virtual_fn;
-            #[cfg(since_api = "4.2")]
             {
                 c.godot_params.validate_property_func = validate_property_fn;
             }
@@ -560,10 +563,7 @@ fn register_class_raw(mut info: ClassRegistrationInfo) {
     let registration_failed = unsafe {
         // Try to register class...
 
-        #[cfg(before_api = "4.2")]
-        let register_fn = interface_fn!(classdb_register_extension_class);
-
-        #[cfg(all(since_api = "4.2", before_api = "4.3"))]
+        #[cfg(before_api = "4.3")]
         let register_fn = interface_fn!(classdb_register_extension_class2);
 
         #[cfg(all(since_api = "4.3", before_api = "4.4"))]
@@ -613,10 +613,6 @@ fn register_class_raw(mut info: ClassRegistrationInfo) {
     if let Some(register_fn) = info.user_register_fn {
         (register_fn.raw)(&mut class_builder);
     }
-
-    if info.is_editor_plugin {
-        unsafe { interface_fn!(editor_add_plugin)(class_name.string_sys()) };
-    }
 }
 
 fn validate_class_constraints(_class: &ClassRegistrationInfo) {
@@ -665,7 +661,7 @@ fn lock_or_panic<T>(global: &'static Global<T>, ctx: &str) -> GlobalGuard<'stati
 
 // Yes, bindgen can implement Default, but only for _all_ types (with single exceptions).
 // For FFI types, it's better to have explicit initialization in the general case though.
-fn default_registration_info(class_name: ClassName) -> ClassRegistrationInfo {
+fn default_registration_info(class_name: ClassId) -> ClassRegistrationInfo {
     ClassRegistrationInfo {
         class_name,
         parent_class_name: None,
@@ -682,30 +678,7 @@ fn default_registration_info(class_name: ClassName) -> ClassRegistrationInfo {
     }
 }
 
-#[cfg(before_api = "4.2")]
-fn default_creation_info() -> sys::GDExtensionClassCreationInfo {
-    sys::GDExtensionClassCreationInfo {
-        is_virtual: false as u8,
-        is_abstract: false as u8,
-        set_func: None,
-        get_func: None,
-        get_property_list_func: None,
-        free_property_list_func: None,
-        property_can_revert_func: None,
-        property_get_revert_func: None,
-        notification_func: None,
-        to_string_func: None,
-        reference_func: None,
-        unreference_func: None,
-        create_instance_func: None,
-        free_instance_func: None,
-        get_virtual_func: None,
-        get_rid_func: None,
-        class_userdata: ptr::null_mut(),
-    }
-}
-
-#[cfg(all(since_api = "4.2", before_api = "4.3"))]
+#[cfg(before_api = "4.3")]
 fn default_creation_info() -> sys::GDExtensionClassCreationInfo2 {
     sys::GDExtensionClassCreationInfo2 {
         is_virtual: false as u8,

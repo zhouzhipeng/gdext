@@ -10,80 +10,154 @@
 //! Re-exported to `crate::private`.
 #![allow(clippy::missing_safety_doc)]
 
+use std::any::Any;
+
+use godot_ffi as sys;
+use sys::conv::u32_to_usize;
+use sys::interface_fn;
+
 use crate::builder::ClassBuilder;
 use crate::builtin::{StringName, Variant};
 use crate::classes::Object;
 use crate::meta::PropertyInfo;
 use crate::obj::{bounds, cap, AsDyn, Base, Bounds, Gd, GodotClass, Inherits, UserClass};
+use crate::private::{handle_panic, IntoVirtualMethodReceiver, PanicPayload};
 use crate::registry::plugin::ErasedDynGd;
 use crate::storage::{as_storage, InstanceStorage, Storage, StorageRefCounted};
-use godot_ffi as sys;
-use std::any::Any;
-use sys::conv::u32_to_usize;
-use sys::interface_fn;
 
-// Creation callback has `p_notify_postinitialize` parameter since 4.4: https://github.com/godotengine/godot/pull/91018.
+/// Godot FFI default constructor.
+///
+/// If the `init()` constructor panics, null is returned.
+///
+/// Creation callback has `p_notify_postinitialize` parameter since 4.4: <https://github.com/godotengine/godot/pull/91018>.
 #[cfg(since_api = "4.4")]
 pub unsafe extern "C" fn create<T: cap::GodotDefault>(
     _class_userdata: *mut std::ffi::c_void,
     _notify_postinitialize: sys::GDExtensionBool,
 ) -> sys::GDExtensionObjectPtr {
-    create_custom(T::__godot_user_init)
+    create_custom(
+        T::__godot_user_init,
+        sys::conv::bool_from_sys(_notify_postinitialize),
+    )
+    .unwrap_or(std::ptr::null_mut())
 }
 
 #[cfg(before_api = "4.4")]
 pub unsafe extern "C" fn create<T: cap::GodotDefault>(
     _class_userdata: *mut std::ffi::c_void,
 ) -> sys::GDExtensionObjectPtr {
-    create_custom(T::__godot_user_init)
+    // `notify_postinitialize` doesn't matter before 4.4, it's sent by Godot when constructing object and we don't send it.
+    create_custom(T::__godot_user_init, true).unwrap_or(std::ptr::null_mut())
 }
 
-#[cfg(since_api = "4.2")]
+/// Workaround for <https://github.com/godot-rust/gdext/issues/874> before Godot 4.5.
+///
+/// Godot expects a creator function, but doesn't require an actual object to be instantiated.
+#[cfg(all(since_api = "4.4", before_api = "4.5"))]
+pub unsafe extern "C" fn create_null<T>(
+    _class_userdata: *mut std::ffi::c_void,
+    _notify_postinitialize: sys::GDExtensionBool,
+) -> sys::GDExtensionObjectPtr {
+    std::ptr::null_mut()
+}
+
+#[cfg(before_api = "4.4")]
+pub unsafe extern "C" fn create_null<T>(
+    _class_userdata: *mut std::ffi::c_void,
+) -> sys::GDExtensionObjectPtr {
+    std::ptr::null_mut()
+}
+
+/// Godot FFI function for recreating a GDExtension instance, e.g. after a hot reload.
+///
+/// If the `init()` constructor panics, null is returned.
 pub unsafe extern "C" fn recreate<T: cap::GodotDefault>(
     _class_userdata: *mut std::ffi::c_void,
     object: sys::GDExtensionObjectPtr,
 ) -> sys::GDExtensionClassInstancePtr {
-    create_rust_part_for_existing_godot_part(T::__godot_user_init, object)
+    create_rust_part_for_existing_godot_part(T::__godot_user_init, object, |_| {})
+        .unwrap_or(std::ptr::null_mut())
 }
 
-pub(crate) fn create_custom<T, F>(make_user_instance: F) -> sys::GDExtensionObjectPtr
+/// Workaround for <https://github.com/godot-rust/gdext/issues/874> before Godot 4.5.
+///
+/// Godot expects a creator function, but doesn't require an actual object to be instantiated.
+#[cfg(before_api = "4.5")]
+pub unsafe extern "C" fn recreate_null<T>(
+    _class_userdata: *mut std::ffi::c_void,
+    _object: sys::GDExtensionObjectPtr,
+) -> sys::GDExtensionClassInstancePtr {
+    std::ptr::null_mut()
+}
+
+pub(crate) fn create_custom<T, F>(
+    make_user_instance: F,
+    notify_postinitialize: bool,
+) -> Result<sys::GDExtensionObjectPtr, PanicPayload>
 where
     T: GodotClass,
     F: FnOnce(Base<T::Base>) -> T,
 {
-    let base_class_name = T::Base::class_name();
+    let base_class_name = T::Base::class_id();
+    let base_ptr = unsafe { sys::classdb_construct_object(base_class_name.string_sys()) };
 
-    let base_ptr = unsafe { interface_fn!(classdb_construct_object)(base_class_name.string_sys()) };
+    let postinit = |base_ptr| {
+        #[cfg(since_api = "4.4")]
+        if notify_postinitialize {
+            // Should notify it with a weak pointer, during `NOTIFICATION_POSTINITIALIZE`, ref-counted object is not yet fully-initialized.
+            let mut obj = unsafe { Gd::<Object>::from_obj_sys_weak(base_ptr) };
+            obj.notify(crate::classes::notify::ObjectNotification::POSTINITIALIZE);
+            obj.drop_weak();
+        }
+    };
 
-    create_rust_part_for_existing_godot_part(make_user_instance, base_ptr);
+    match create_rust_part_for_existing_godot_part(make_user_instance, base_ptr, postinit) {
+        Ok(_extension_ptr) => Ok(base_ptr),
+        Err(payload) => {
+            // Creation of extension object failed; we must now also destroy the base object to avoid leak.
+            // SAFETY: `base_ptr` was just created above.
+            unsafe { interface_fn!(object_destroy)(base_ptr) };
+
+            Err(payload)
+        }
+    }
 
     // std::mem::forget(base_class_name);
-    base_ptr
 }
 
-// with GDExt, custom object consists from two parts: Godot object and Rust object, that are
-// bound to each other. this method takes the first by pointer, creates the second with
-// supplied state and binds them together. that's used for both brand-new objects creation and
-// hot reload - during hot-reload, Rust objects are disposed and then created again with an
-// updated code, so that's necessary to link them to Godot objects again.
-fn create_rust_part_for_existing_godot_part<T, F>(
+/// Add Rust-side state for a GDExtension base object.
+///
+/// With godot-rust, custom objects consist of two parts: the Godot object and the Rust object. This method takes the Godot part by pointer,
+/// creates the Rust part with the supplied state, and links them together. This is used for both brand-new object creation and hot reload.
+/// During hot reload, Rust objects are disposed of and then created again with updated code, so it's necessary to re-link them to Godot objects.
+fn create_rust_part_for_existing_godot_part<T, F, P>(
     make_user_instance: F,
     base_ptr: sys::GDExtensionObjectPtr,
-) -> sys::GDExtensionClassInstancePtr
+    postinit: P,
+) -> Result<sys::GDExtensionClassInstancePtr, PanicPayload>
 where
     T: GodotClass,
     F: FnOnce(Base<T::Base>) -> T,
+    P: Fn(sys::GDExtensionObjectPtr),
 {
-    let class_name = T::class_name();
-
+    let class_name = T::class_id();
     //out!("create callback: {}", class_name.backing);
 
     let base = unsafe { Base::from_sys(base_ptr) };
-    let user_instance = make_user_instance(unsafe { Base::from_base(&base) });
+
+    // User constructor init() can panic, which crashes the engine if unhandled.
+    let context = || format!("panic during {class_name}::init() constructor");
+    let code = || make_user_instance(unsafe { Base::from_base(&base) });
+    let user_instance = handle_panic(context, std::panic::AssertUnwindSafe(code))?;
+
+    // Print shouldn't be necessary as panic itself is printed. If this changes, re-enable in error case:
+    // godot_error!("failed to create instance of {class_name}; Rust init() panicked");
+
+    let mut base_copy = unsafe { Base::from_base(&base) };
 
     let instance = InstanceStorage::<T>::construct(user_instance, base);
-    let instance_ptr = instance.into_raw();
-    let instance_ptr = instance_ptr as sys::GDExtensionClassInstancePtr;
+    let instance_rust_ptr = instance.into_raw();
+    let instance_ptr = instance_rust_ptr as sys::GDExtensionClassInstancePtr;
 
     let binding_data_callbacks = crate::storage::nop_instance_callbacks();
     unsafe {
@@ -96,8 +170,13 @@ where
         );
     }
 
-    // std::mem::forget(class_name);
-    instance_ptr
+    postinit(base_ptr);
+
+    // Mark initialization as complete, now that user constructor has finished.
+    base_copy.mark_initialized();
+
+    // No std::mem::forget(base_copy) here, since Base may stores other fields that need deallocation.
+    Ok(instance_ptr)
 }
 
 pub unsafe extern "C" fn free<T: GodotClass>(
@@ -164,32 +243,21 @@ pub unsafe extern "C" fn default_get_virtual<T: UserClass>(
 
 pub unsafe extern "C" fn to_string<T: cap::GodotToString>(
     instance: sys::GDExtensionClassInstancePtr,
-    _is_valid: *mut sys::GDExtensionBool,
+    is_valid: *mut sys::GDExtensionBool,
     out_string: sys::GDExtensionStringPtr,
 ) {
     // Note: to_string currently always succeeds, as it is only provided for classes that have a working implementation.
-    // is_valid output parameter thus not needed.
 
     let storage = as_storage::<T>(instance);
-    let instance = storage.get();
-    let string = T::__godot_to_string(&*instance);
+    let string = T::__godot_to_string(T::Recv::instance(storage));
 
     // Transfer ownership to Godot
     string.move_into_string_ptr(out_string);
+
+    // Note: is_valid comes uninitialized and must be set.
+    *is_valid = sys::conv::SYS_TRUE;
 }
 
-#[cfg(before_api = "4.2")]
-pub unsafe extern "C" fn on_notification<T: cap::GodotNotification>(
-    instance: sys::GDExtensionClassInstancePtr,
-    what: i32,
-) {
-    let storage = as_storage::<T>(instance);
-    let mut instance = storage.get_mut();
-
-    T::__godot_notification(&mut *instance, what);
-}
-
-#[cfg(since_api = "4.2")]
 pub unsafe extern "C" fn on_notification<T: cap::GodotNotification>(
     instance: sys::GDExtensionClassInstancePtr,
     what: i32,
@@ -207,10 +275,10 @@ pub unsafe extern "C" fn get_property<T: cap::GodotGet>(
     ret: sys::GDExtensionVariantPtr,
 ) -> sys::GDExtensionBool {
     let storage = as_storage::<T>(instance);
-    let instance = storage.get();
+    let instance = T::Recv::instance(storage);
     let property = StringName::new_from_string_sys(name);
 
-    match T::__godot_get_property(&*instance, property) {
+    match T::__godot_get_property(instance, property) {
         Some(value) => {
             value.move_into_var_ptr(ret);
             sys::conv::SYS_TRUE
@@ -225,12 +293,12 @@ pub unsafe extern "C" fn set_property<T: cap::GodotSet>(
     value: sys::GDExtensionConstVariantPtr,
 ) -> sys::GDExtensionBool {
     let storage = as_storage::<T>(instance);
-    let mut instance = storage.get_mut();
+    let instance = T::Recv::instance(storage);
 
     let property = StringName::new_from_string_sys(name);
     let value = Variant::new_from_var_sys(value);
 
-    sys::conv::bool_to_sys(T::__godot_set_property(&mut *instance, property, value))
+    sys::conv::bool_to_sys(T::__godot_set_property(instance, property, value))
 }
 
 pub unsafe extern "C" fn reference<T: GodotClass>(instance: sys::GDExtensionClassInstancePtr) {
@@ -253,9 +321,9 @@ pub unsafe extern "C" fn get_property_list<T: cap::GodotGetPropertyList>(
 ) -> *const sys::GDExtensionPropertyInfo {
     // SAFETY: Godot provides us with a valid instance pointer to a `T`. And it will live until the end of this function.
     let storage = unsafe { as_storage::<T>(instance) };
-    let mut instance = storage.get_mut();
+    let instance = T::Recv::instance(storage);
 
-    let property_list = T::__godot_get_property_list(&mut *instance);
+    let property_list = T::__godot_get_property_list(instance);
     let property_list_sys: Box<[sys::GDExtensionPropertyInfo]> = property_list
         .into_iter()
         .map(|prop| prop.into_owned_property_sys())
@@ -316,11 +384,11 @@ unsafe fn raw_property_get_revert<T: cap::GodotPropertyGetRevert>(
 ) -> Option<Variant> {
     // SAFETY: `instance` is a valid `T` instance pointer for the duration of this function call.
     let storage = unsafe { as_storage::<T>(instance) };
-    let instance = storage.get();
+    let instance = T::Recv::instance(storage);
 
     // SAFETY: `property_name` is a valid `StringName` pointer for the duration of this function call.
     let property = unsafe { StringName::borrow_string_sys(property_name) };
-    T::__godot_property_get_revert(&*instance, property.clone())
+    T::__godot_property_get_revert(instance, property.clone())
 }
 
 /// # Safety
@@ -369,37 +437,26 @@ pub unsafe extern "C" fn property_get_revert<T: cap::GodotPropertyGetRevert>(
 /// - `property_info_ptr` must be valid for the whole duration of this function call (i.e. - can't be freed nor consumed).
 ///
 #[deny(unsafe_op_in_unsafe_fn)]
-#[cfg(since_api = "4.2")]
 pub unsafe extern "C" fn validate_property<T: cap::GodotValidateProperty>(
     instance: sys::GDExtensionClassInstancePtr,
     property_info_ptr: *mut sys::GDExtensionPropertyInfo,
 ) -> sys::GDExtensionBool {
     // SAFETY: `instance` is a valid `T` instance pointer for the duration of this function call.
     let storage = unsafe { as_storage::<T>(instance) };
-    let instance = storage.get();
+    let instance = T::Recv::instance(storage);
 
     // SAFETY: property_info_ptr must be valid.
     let mut property_info = unsafe { PropertyInfo::new_from_sys(property_info_ptr) };
-    T::__godot_validate_property(&*instance, &mut property_info);
+    T::__godot_validate_property(instance, &mut property_info);
 
     // SAFETY: property_info_ptr remains valid & unchanged.
     unsafe { property_info.move_into_property_info_ptr(property_info_ptr) };
 
     sys::conv::SYS_TRUE
 }
+
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Safe, higher-level methods
-
-/// Abstracts the `GodotDefault` away, for contexts where this trait bound is not statically available
-pub fn erased_init<T: cap::GodotDefault>(base: Box<dyn Any>) -> Box<dyn Any> {
-    let concrete = base
-        .downcast::<Base<<T as GodotClass>::Base>>()
-        .expect("erased_init: bad type erasure");
-    let extracted: Base<_> = sys::unbox(concrete);
-
-    let instance = T::__godot_user_init(extracted);
-    Box::new(instance)
-}
 
 pub fn register_class_by_builder<T: cap::GodotRegisterClass>(_class_builder: &mut dyn Any) {
     // TODO use actual argument, once class builder carries state

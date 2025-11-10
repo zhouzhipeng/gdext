@@ -6,10 +6,11 @@
  */
 
 use godot::builtin::{
-    array, dict, Array, Dictionary, GString, NodePath, StringName, Variant, VariantArray, Vector2,
+    array, vdict, Array, Dictionary, GString, NodePath, StringName, Variant, VariantArray, Vector2,
     Vector2Axis,
 };
 use godot::classes::{Node, Resource};
+use godot::meta;
 use godot::meta::error::ConvertError;
 use godot::meta::{AsArg, CowArg, FromGodot, GodotConvert, ToGodot};
 use godot::obj::{Gd, NewAlloc};
@@ -107,10 +108,10 @@ impl GodotConvert for ConvertedStruct {
 }
 
 impl ToGodot for ConvertedStruct {
-    type ToVia<'v> = Dictionary;
+    type Pass = godot::meta::ByValue;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
-        dict! {
+    fn to_godot(&self) -> Self::Via {
+        vdict! {
             "a": self.a,
             "b": self.b,
         }
@@ -159,7 +160,7 @@ fn custom_convert_roundtrip() {
 // method of `Variant` as they should be.
 #[itest]
 fn custom_convert_error_from_variant() {
-    let missing_a = dict! {
+    let missing_a = vdict! {
         "b": -0.001
     };
     let err = missing_a
@@ -172,7 +173,7 @@ fn custom_convert_error_from_variant() {
         ConvertedStruct::MISSING_KEY_A
     );
 
-    let missing_b = dict! {
+    let missing_b = vdict! {
         "a": 58,
     };
     let err = missing_b
@@ -185,7 +186,7 @@ fn custom_convert_error_from_variant() {
         ConvertedStruct::MISSING_KEY_B
     );
 
-    let too_many_keys = dict! {
+    let too_many_keys = vdict! {
         "a": 12,
         "b": 777.777,
         "c": "bar"
@@ -200,7 +201,7 @@ fn custom_convert_error_from_variant() {
         ConvertedStruct::TOO_MANY_KEYS
     );
 
-    let wrong_type_a = dict! {
+    let wrong_type_a = vdict! {
         "a": "hello",
         "b": 28.41,
     };
@@ -215,7 +216,7 @@ fn custom_convert_error_from_variant() {
         format!("{:?}", "hello".to_variant())
     );
 
-    let wrong_type_b = dict! {
+    let wrong_type_b = vdict! {
         "a": 29,
         "b": Vector2::new(1.0, 23.4),
     };
@@ -230,7 +231,7 @@ fn custom_convert_error_from_variant() {
         format!("{:?}", Vector2::new(1.0, 23.4).to_variant())
     );
 
-    let too_big_value = dict! {
+    let too_big_value = vdict! {
         "a": i64::MAX,
         "b": f32::NAN
     };
@@ -326,15 +327,15 @@ fn slice_to_array() {
     assert!(to.is_err());
 }
 
-fn as_gstr_arg<'a, T: 'a + AsArg<GString>>(t: T) -> CowArg<'a, GString> {
+fn as_gstr_arg<'arg, T: 'arg + AsArg<GString>>(t: T) -> CowArg<'arg, GString> {
     t.into_arg()
 }
 
-fn as_sname_arg<'a, T: 'a + AsArg<StringName>>(t: T) -> CowArg<'a, StringName> {
+fn as_sname_arg<'arg, T: 'arg + AsArg<StringName>>(t: T) -> CowArg<'arg, StringName> {
     t.into_arg()
 }
 
-fn as_npath_arg<'a, T: 'a + AsArg<NodePath>>(t: T) -> CowArg<'a, NodePath> {
+fn as_npath_arg<'arg, T: 'arg + AsArg<NodePath>>(t: T) -> CowArg<'arg, NodePath> {
     t.into_arg()
 }
 
@@ -343,7 +344,6 @@ fn strings_as_arg() {
     // Note: CowArg is an internal type.
 
     let str = "GodotRocks";
-    let cstr = c"GodotRocks";
     let gstring = GString::from("GodotRocks");
     let sname = StringName::from("GodotRocks");
     let npath = NodePath::from("GodotRocks");
@@ -354,8 +354,6 @@ fn strings_as_arg() {
     assert_eq!(as_gstr_arg(npath.arg()), CowArg::Owned(gstring.clone()));
 
     assert_eq!(as_sname_arg(str), CowArg::Owned(sname.clone()));
-    #[cfg(since_api = "4.2")]
-    assert_eq!(as_sname_arg(cstr), CowArg::Owned(sname.clone()));
     assert_eq!(as_sname_arg(&sname), CowArg::Borrowed(&sname));
     assert_eq!(as_sname_arg(gstring.arg()), CowArg::Owned(sname.clone()));
     assert_eq!(as_sname_arg(npath.arg()), CowArg::Owned(sname.clone()));
@@ -364,4 +362,21 @@ fn strings_as_arg() {
     assert_eq!(as_npath_arg(&npath), CowArg::Borrowed(&npath));
     assert_eq!(as_npath_arg(gstring.arg()), CowArg::Owned(npath.clone()));
     assert_eq!(as_npath_arg(sname.arg()), CowArg::Owned(npath.clone()));
+}
+
+#[itest]
+fn to_arg_helpers() {
+    let i: i8 = 3;
+    let mut ints = array![1, 2];
+    ints.push(meta::ref_to_arg(&i));
+    ints.push(meta::owned_into_arg(i));
+
+    assert_eq!(ints, array![1, 2, 3, 3]);
+
+    let s = StringName::from("Godot");
+    let mut names = array![&StringName::from("Hello")];
+    names.push(meta::ref_to_arg(&s));
+    names.push(meta::owned_into_arg(s));
+
+    assert_eq!(names, array!["Hello", "Godot", "Godot"]);
 }

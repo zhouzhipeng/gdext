@@ -5,248 +5,97 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::builtin::{Callable, GString, Variant};
+use super::{make_callable_name, make_godot_fn};
+#[cfg(feature = "experimental-threads")]
+use crate::builtin::Callable;
+use crate::builtin::{GString, Variant};
 use crate::classes::object::ConnectFlags;
 use crate::meta;
-use crate::obj::{bounds, Bounds, Gd, GodotClass, WithBaseField};
-use crate::registry::signal::{SignalReceiver, TypedSignal};
+use crate::meta::{InParamTuple, ObjectToOwned};
+use crate::obj::{bounds, Bounds, Gd, GodotClass, WithSignals};
+use crate::registry::signal::signal_receiver::{IndirectSignalReceiver, SignalReceiver};
+use crate::registry::signal::{ConnectHandle, TypedSignal};
 
-/// Type-state builder for customizing signal connections.
+/// Builder for customizing signal connections.
 ///
-/// Allows a high degree of customization for connecting signals, while maintaining complete type safety.
+/// Allows a high degree of customization for connecting [`TypedSignal`], while maintaining complete type safety.
+///
+/// See the [Signals](https://godot-rust.github.io/book/register/signals.html) chapter in the book for a general introduction and examples.
+///
+/// # Customization
+/// Customizing your signal connection must be done **before** providing the function being connected
+/// (can be done by using of the `connect_*` methods) (see section `Finalizing` bellow).
+///
+/// All these methods are optional, and they can be combined.
+// Use HTML link due to conditional compilation; renders badly if target symbol is unavailable.
+/// - [`name()`][Self::name]: Name of the `Callable` (for debug purposes).  \
+///   If not specified, the Rust function name is used. This is typically a good default, but not very readable for closures.
+/// - [`flags()`][Self::flags]: Provide one or multiple [`ConnectFlags`][crate::classes::object::ConnectFlags], possibly combined with bitwise OR.
+///
+/// # Finalizing
+/// After customizing your builder, you can register the connection with various `connect_*` functions.
+///
+/// To connect to **methods** (member functions) with a signal object, you have the following combinations:
+///
+/// | Signal object | 1st parameter `&mut C`                         | 1st parameter `&mut Gd<C>`                   |
+/// |---------------|------------------------------------------------|----------------------------------------------|
+/// | `self`        | [`connect_self_mut`][Self::connect_self_mut]   | [`connect_self_gd`][Self::connect_self_gd]   |
+/// | other object  | [`connect_other_mut`][Self::connect_other_mut] | [`connect_other_gd`][Self::connect_other_gd] |
+///
+/// Methods taking `&C` can (e.g. using interior mutability) can be indirectly connected through a `*_gd` overload + a `Gd::bind()` call.
+/// If this turns out to be a common use case, we could consider `connect_*_ref()` in the future.
+///
+/// <br>
+///
+/// For **global functions, associated functions and closures**, you can use the following APIs:
+/// - [`connect()`][Self::connect]: Connect any function running on the same thread as the signal emitter.
+/// - [`connect_sync()`](#method.connect_sync): Connect a global/associated function or closure that should be callable across threads.
+///   Allows signals to be emitted from other threads.
+///   - Requires `Send` + `Sync` bounds on the provided function.
+///   - Is only available for the Cargo feature `experimental-threads`.
+///
+/// # Implementation and documentation notes
+/// See [`TypedSignal` docs](struct.TypedSignal.html#implementation-and-documentation-notes) for a background on the `connect_*` API design.
 ///
 /// <div class="warning">
 /// <strong>Warning:</strong>
-/// Exact type parameters are subject to change and not part of the public API. We could annotate <code>#[doc(hidden)]</code>, but it would make
-/// things harder to understand. Thus, try not to name the <code>ConnectBuilder</code> type in your code; most connection setup doesn't need it.
+/// Exact type parameters are subject to change and not part of the public API. Since it's a type-state API, new states might require new
+/// type parameters. Thus, try not to name the <code>ConnectBuilder</code> type in your code; most connection setup doesn't need it.
 /// </div>
 // If naming the type becomes a requirement, there may be some options:
 // - Use a type alias in the module or TypedSignal, exposing only public parameters. This would work for constructor, but not all transformations.
 // - Pack multiple types together into "type lists", i.e. custom structs carrying the type state. For a user, this would appear as one type,
 // - which could also be #[doc(hidden)]. However, this may make the trait resolution more complex and worsen error messages, so not done now.
-///
-/// # Builder stages
-///
-/// The builder API has a well-defined flow and is separated in stages. In each stage, you have certain builder methods available that you can
-/// or must call, before advancing to the next stage. Check the instructions.
-///
-/// ## Stage 1 (required)
-/// Choose one:
-/// - [`function`][Self::function]: Connect a global/associated function or a closure.
-/// - [`object_self`][Self::object_self]: If you want to connect a method (in stage 2), running on the same object as the signal.
-/// - [`object`][Self::object]: If you want to connect a method, running on a separate object.
-///
-/// ## Stage 2 (conditional)
-/// Required iff _(if and only if)_ `object_self` or `object` was called in stage 1.
-/// - [`method_mut`][Self::method_mut]: Connect a `&mut self` method.
-/// - [`method_immut`][Self::method_immut]: Connect a `&self` method.
-///
-/// ## Stage 3
-/// All these methods are optional, and they can be combined.
-// Use HTML link due to conditional compilation; renders badly if target symbol is unavailable.
-/// - [`sync`](#method.sync): If the signal connection should be callable across threads.  \
-///   Requires `Send` + `Sync` bounds on the provided function/method, and is only available for the `experimental-threads` Cargo feature.
-/// - [`name`][Self::name]: Name of the `Callable` (for debug purposes).  \
-///   If not specified, the Rust function name is used. This is typically a good default, but not very readable for closures.
-/// - [`flags`][Self::flags]: Provide one or multiple [`ConnectFlags`][crate::classes::object::ConnectFlags], possibly combined with bitwise OR.
-///
-/// ## Final stage
-/// - [`done`][Self::done]: Finalize the connection. Consumes the builder and registers the signal with Godot.
-///
 #[must_use]
-pub struct ConnectBuilder<'ts, 'c, CSig: GodotClass, CRcv, Ps, GodotFn> {
-    parent_sig: &'ts mut TypedSignal<'c, CSig, Ps>,
+pub struct ConnectBuilder<'ts, 'c, C: WithSignals, Ps> {
+    parent_sig: &'ts TypedSignal<'c, C, Ps>,
     data: BuilderData,
-
-    // Type-state data.
-    receiver_obj: CRcv,
-    godot_fn: GodotFn,
 }
 
-impl<'ts, 'c, CSig: WithBaseField, Ps: meta::ParamTuple> ConnectBuilder<'ts, 'c, CSig, (), Ps, ()> {
-    pub(super) fn new(parent_sig: &'ts mut TypedSignal<'c, CSig, Ps>) -> Self {
-        ConnectBuilder {
-            parent_sig,
-            data: BuilderData::default(),
-            godot_fn: (),
-            receiver_obj: (),
-        }
-    }
+/// Gathers all the non-typestate data, so that the builder can easily transfer it without manually moving each field.
+#[derive(Default)]
+struct BuilderData {
+    /// User-specified name; if not provided, the Rust RTTI type name of the function is used.
+    callable_name: Option<GString>,
 
-    /// **Stage 1:** global/associated function or closure.
-    pub fn function<F>(
-        self,
-        mut function: F,
-    ) -> ConnectBuilder<
-        'ts,
-        'c,
-        /* CSig = */ CSig,
-        /* CRcv = */ (),
-        /* Ps = */ Ps,
-        /* GodotFn= */ impl FnMut(&[&Variant]) -> Result<Variant, ()> + 'static,
-    >
-    where
-        F: SignalReceiver<(), Ps>,
-    {
-        let godot_fn = make_godot_fn(move |args| {
-            function.call((), args);
-        });
-
-        ConnectBuilder {
-            parent_sig: self.parent_sig,
-            data: self.data.with_callable_name::<F>(),
-            godot_fn,
-            receiver_obj: (),
-        }
-    }
-
-    /// **Stage 1:** prepare for a method taking `self` (the class declaring the `#[signal]`).
-    pub fn object_self(self) -> ConnectBuilder<'ts, 'c, CSig, Gd<CSig>, Ps, ()> {
-        let receiver_obj: Gd<CSig> = self.parent_sig.receiver_object();
-
-        ConnectBuilder {
-            parent_sig: self.parent_sig,
-            data: self.data,
-            godot_fn: (),
-            receiver_obj,
-        }
-    }
-
-    /// **Stage 1:** prepare for a method taking any `Gd<T>` object.
-    pub fn object<C: GodotClass>(
-        self,
-        object: &Gd<C>,
-    ) -> ConnectBuilder<'ts, 'c, CSig, Gd<C>, Ps, ()> {
-        ConnectBuilder {
-            parent_sig: self.parent_sig,
-            data: self.data,
-            godot_fn: (),
-            receiver_obj: object.clone(),
-        }
-    }
-}
-
-impl<'ts, 'c, CSig: WithBaseField, CRcv: GodotClass, Ps: meta::ParamTuple>
-    ConnectBuilder<'ts, 'c, CSig, Gd<CRcv>, Ps, ()>
-{
-    /// **Stage 2:** method taking `&mut self`.
-    pub fn method_mut<F>(
-        self,
-        mut method_with_mut_self: F,
-    ) -> ConnectBuilder<
-        'ts,
-        'c,
-        /* CSig = */ CSig,
-        /* CRcv: again reset to unit type, after object has been captured in closure. */
-        (),
-        /* Ps = */ Ps,
-        /* GodotFn = */ impl FnMut(&[&Variant]) -> Result<Variant, ()>,
-    >
-    where
-        CRcv: GodotClass + Bounds<Declarer = bounds::DeclUser>,
-        for<'c_rcv> F: SignalReceiver<&'c_rcv mut CRcv, Ps>,
-    {
-        let mut gd: Gd<CRcv> = self.receiver_obj;
-        let godot_fn = make_godot_fn(move |args| {
-            let mut guard = gd.bind_mut();
-            let instance = &mut *guard;
-            method_with_mut_self.call(instance, args);
-        });
-
-        ConnectBuilder {
-            parent_sig: self.parent_sig,
-            data: self.data.with_callable_name::<F>(),
-            godot_fn,
-            receiver_obj: (),
-        }
-    }
-
-    /// **Stage 2:** method taking `&self`.
-    pub fn method_immut<F>(
-        self,
-        mut method_with_shared_self: F,
-    ) -> ConnectBuilder<
-        'ts,
-        'c,
-        /* CSig = */ CSig,
-        /* CRcv: again reset to unit type, after object has been captured in closure. */
-        (),
-        /* Ps = */ Ps,
-        /* GodotFn = */ impl FnMut(&[&Variant]) -> Result<Variant, ()>,
-    >
-    where
-        CRcv: GodotClass + Bounds<Declarer = bounds::DeclUser>,
-        for<'c_rcv> F: SignalReceiver<&'c_rcv CRcv, Ps>,
-    {
-        let gd: Gd<CRcv> = self.receiver_obj;
-        let godot_fn = make_godot_fn(move |args| {
-            let guard = gd.bind();
-            let instance = &*guard;
-            method_with_shared_self.call(instance, args);
-        });
-
-        ConnectBuilder {
-            parent_sig: self.parent_sig,
-            data: self.data.with_callable_name::<F>(),
-            godot_fn,
-            receiver_obj: (),
-        }
-    }
+    /// Godot connection flags.
+    connect_flags: Option<ConnectFlags>,
 }
 
 #[allow(clippy::needless_lifetimes)] // 'ts + 'c are used conditionally.
-impl<'ts, 'c, CSig, CRcv, Ps, GodotFn> ConnectBuilder<'ts, 'c, CSig, CRcv, Ps, GodotFn>
+impl<'ts, 'c, C, Ps> ConnectBuilder<'ts, 'c, C, Ps>
 where
-    CSig: WithBaseField,
+    C: WithSignals,
     Ps: meta::ParamTuple,
-    GodotFn: FnMut(&[&Variant]) -> Result<Variant, ()> + 'static,
 {
-    /// **Stage 3:** allow signal to be called across threads.
-    ///
-    /// Requires `Send` + `Sync` bounds on the previously provided function/method, and is only available for the `experimental-threads`
-    /// Cargo feature.
-    #[cfg(feature = "experimental-threads")]
-    pub fn sync(
-        self,
-    ) -> ConnectBuilder<
-        'ts,
-        'c,
-        /* CSig = */ CSig,
-        /* CRcv = */ CRcv,
-        /* Ps = */ Ps,
-        /* GodotFn = */ impl FnMut(&[&Variant]) -> Result<Variant, ()>,
-    >
-    where
-        // Why both Send+Sync: closure can not only impact another thread (Sync), but it's also possible to share such Callables across threads
-        // (Send) or even call them from multiple threads (Sync). We don't differentiate the fine-grained needs, it's either thread-safe or not.
-        GodotFn: Send + Sync,
-    {
-        let Self {
-            parent_sig,
-            mut data,
-            receiver_obj,
-            godot_fn,
-        } = self;
-
-        assert!(
-            data.sync_callable.is_none(),
-            "sync() called twice on the same builder."
-        );
-
-        let dummy_fn =
-            |_variants: &[&Variant]| panic!("sync() closure should have been replaced by now.");
-
-        data.sync_callable = Some(Callable::from_sync_fn(data.callable_name_ref(), godot_fn));
-
+    pub(super) fn new(parent_sig: &'ts TypedSignal<'c, C, Ps>) -> Self {
         ConnectBuilder {
             parent_sig,
-            data,
-            godot_fn: dummy_fn,
-            receiver_obj,
+            data: BuilderData::default(),
         }
     }
 
-    /// **Stage 3:** Name of the `Callable`, mostly used for debugging.
+    /// Name of the `Callable`, mostly used for debugging.
     ///
     /// If not provided, the Rust type name of the function/method is used.
     pub fn name(mut self, name: impl meta::AsArg<GString>) -> Self {
@@ -260,7 +109,7 @@ where
         self
     }
 
-    /// **Stage 3:** add one or multiple flags to the connection, possibly combined with `|` operator.
+    /// Add one or multiple flags to the connection, possibly combined with `|` operator.
     pub fn flags(mut self, flags: ConnectFlags) -> Self {
         assert!(
             self.data.connect_flags.is_none(),
@@ -271,81 +120,204 @@ where
         self
     }
 
-    /// Finalize the builder.
+    /// Directly connect a Rust callable `godot_fn`, with a name based on `F`.
     ///
-    /// Actually connects the signal with the provided function/method. Consumes this builder instance and returns the mutable borrow of
-    /// the parent [`TypedSignal`] for further use.
-    pub fn done(self) {
-        let Self {
-            parent_sig,
-            data,
-            godot_fn,
-            receiver_obj: _,
-        } = self;
-
-        let callable_name = data.callable_name_ref();
-
-        // If sync() was previously called, use the already-existing callable, otherwise construct a local one now.
-        #[cfg(feature = "experimental-threads")]
-        let callable = match data.sync_callable {
-            Some(sync_callable) => sync_callable,
-            None => Callable::from_local_fn(callable_name, godot_fn),
+    /// This exists as a shorthand for the connect methods and avoids the generic instantiation of the full-blown
+    /// type state builder for simple + common connections, thus hopefully being a tiny bit lighter on compile times.
+    fn inner_connect_godot_fn<F>(
+        self,
+        godot_fn: impl FnMut(&[&Variant]) -> Variant + 'static,
+        bound: &Gd<impl GodotClass>,
+    ) -> ConnectHandle {
+        let callable_name = match &self.data.callable_name {
+            Some(user_provided_name) => user_provided_name,
+            None => &make_callable_name::<F>(),
         };
 
-        #[cfg(not(feature = "experimental-threads"))]
-        let callable = Callable::from_local_fn(callable_name, godot_fn);
-
-        parent_sig.inner_connect_untyped(&callable, data.connect_flags);
+        let callable = bound.linked_callable(callable_name, godot_fn);
+        self.parent_sig
+            .inner_connect_untyped(callable, self.data.connect_flags)
     }
 }
 
-// ----------------------------------------------------------------------------------------------------------------------------------------------
+impl<C: WithSignals, Ps: InParamTuple + 'static> ConnectBuilder<'_, '_, C, Ps> {
+    /// Connect a non-member function (global function, associated function or closure).
+    ///
+    /// Example usages:
+    /// ```ignore
+    /// sig.builder().connect(Self::static_func);
+    /// sig.builder().flags(ConnectFlags::DEFERRED).connect(global_func);
+    /// sig.connect(|arg| { /* closure */ });
+    /// ```
+    ///
+    /// # Related APIs
+    /// - To connect to a method on the object that owns this signal, use [`connect_self_mut()`][Self::connect_self_mut] or
+    ///   [`connect_self_gd()`][Self::connect_self_gd].
+    /// - To connect to methods on other objects, use [`connect_other_mut()`][Self::connect_other_mut] or
+    ///   [`connect_other_gd()`][Self::connect_other_gd].
+    /// - If you need [`connect flags`](ConnectFlags), call [`flags()`](Self::flags) before this.
+    /// - If you need cross-thread signals, use [`connect_sync()`](#method.connect_sync) instead (requires feature "experimental-threads").
+    pub fn connect<F>(self, mut function: F) -> ConnectHandle
+    where
+        for<'c_rcv> F: SignalReceiver<(), Ps>,
+        for<'c_rcv> IndirectSignalReceiver<'c_rcv, (), Ps, F>: From<&'c_rcv mut F>,
+    {
+        let godot_fn = make_godot_fn(move |args| {
+            IndirectSignalReceiver::from(&mut function)
+                .function()
+                .call((), args);
+        });
 
-/// Gathers all the non-typestate data, so that the builder can easily transfer it without manually moving each field.
-#[derive(Default)]
-struct BuilderData {
-    /// User-specified name; if not provided, the Rust RTTI type name of the function is used.
-    callable_name: Option<GString>,
+        let bound = self.parent_sig.receiver_object();
+        self.inner_connect_godot_fn::<F>(godot_fn, &bound)
+    }
 
-    /// Godot connection flags.
-    connect_flags: Option<ConnectFlags>,
+    /// Connect a method with `&mut self` as the first parameter (user classes only).
+    ///
+    /// # Related APIs
+    /// - Use [`connect_self_gd()`][Self::connect_self_gd] to receive `Gd<Self>` instead and avoid implicit `bind_mut()` on emit.  \
+    ///   For engine classes, `&mut self` is not supported at all.
+    /// - To connect to methods on other objects, use [`connect_other_mut()`][Self::connect_other_mut].
+    /// - If you need [connect flags](ConnectFlags), call [`flags()`](Self::flags) before this.
+    /// - If you need cross-thread signals, use [`connect_sync()`](#method.connect_sync) instead (requires feature `experimental-threads`).
+    pub fn connect_self_mut<F>(self, mut function: F) -> ConnectHandle
+    where
+        C: Bounds<Declarer = bounds::DeclUser>,
+        for<'c_rcv> F: SignalReceiver<&'c_rcv mut C, Ps>,
+        for<'c_rcv> IndirectSignalReceiver<'c_rcv, &'c_rcv mut C, Ps, F>: From<&'c_rcv mut F>,
+    {
+        let mut gd = self.parent_sig.receiver_object();
 
-    /// If [`sync()`][ConnectBuilder::sync] was called, then this already contains the populated closure.
+        let godot_fn = make_godot_fn(move |args| {
+            let mut guard = Gd::bind_mut(&mut gd);
+            IndirectSignalReceiver::from(&mut function)
+                .function()
+                .call(&mut *guard, args);
+        });
+
+        let bound = self.parent_sig.receiver_object();
+        self.inner_connect_godot_fn::<F>(godot_fn, &bound)
+    }
+
+    /// Connect a method with `&mut Gd<Self>` as the first parameter (user + engine classes).
+    ///
+    /// # Related APIs
+    /// - If your class `C` is user-defined and you'd like to have an automatic `bind_mut()` and receive `&mut self`, then
+    ///   use [`connect_self_mut()`][Self::connect_self_mut] instead.
+    /// - To connect to methods on other objects, use [`connect_other_gd()`][Self::connect_other_gd].
+    /// - If you need [connect flags](ConnectFlags), call [`flags()`](Self::flags) before this.
+    /// - If you need cross-thread signals, use [`connect_sync()`](#method.connect_sync) instead (requires feature `experimental-threads`).
+    pub fn connect_self_gd<F>(self, mut function: F) -> ConnectHandle
+    where
+        F: SignalReceiver<Gd<C>, Ps>,
+        for<'c_rcv> IndirectSignalReceiver<'c_rcv, Gd<C>, Ps, F>: From<&'c_rcv mut F>,
+    {
+        let gd = self.parent_sig.receiver_object();
+        let bound = gd.clone();
+
+        let godot_fn = make_godot_fn(move |args| {
+            IndirectSignalReceiver::from(&mut function)
+                .function()
+                .call(gd.clone(), args);
+        });
+
+        self.inner_connect_godot_fn::<F>(godot_fn, &bound)
+    }
+
+    /// Connect a method with any `&mut OtherC` as the first parameter (user classes only).
+    ///
+    /// The parameter `object` can be of 2 different "categories":
+    /// - Any `&Gd<OtherC>` (e.g.: `&Gd<Node>`, `&Gd<MyClass>`).
+    /// - `&OtherC`, as long as `OtherC` is a user class that contains a `Base<T>` field (it implements the
+    ///   [`WithBaseField`](crate::obj::WithBaseField) trait).
+    ///
+    /// # Related APIs
+    /// - Use [`connect_other_gd()`][Self::connect_other_gd] to receive `Gd<Self>` instead and avoid implicit `bind_mut()` on emit.  \
+    ///   For engine classes, `&mut self` is not supported at all.
+    /// - To connect to methods on the object that owns this signal, use [`connect_self_mut()`][Self::connect_self_mut].
+    /// - If you need [connect flags](ConnectFlags), call [`flags()`](Self::flags) before this.
+    /// - If you need cross-thread signals, use [`connect_sync()`](#method.connect_sync) instead (requires feature "experimental-threads").
+    pub fn connect_other_mut<F, OtherC>(
+        self,
+        object: &impl ObjectToOwned<OtherC>,
+        mut method: F,
+    ) -> ConnectHandle
+    where
+        OtherC: GodotClass + Bounds<Declarer = bounds::DeclUser>,
+        for<'c_rcv> F: SignalReceiver<&'c_rcv mut OtherC, Ps>,
+        for<'c_rcv> IndirectSignalReceiver<'c_rcv, &'c_rcv mut OtherC, Ps, F>: From<&'c_rcv mut F>,
+    {
+        let mut gd = object.object_to_owned();
+
+        let godot_fn = make_godot_fn(move |args| {
+            let mut guard = Gd::bind_mut(&mut gd);
+            IndirectSignalReceiver::from(&mut method)
+                .function()
+                .call(&mut *guard, args);
+        });
+
+        self.inner_connect_godot_fn::<F>(godot_fn, &object.object_to_owned())
+    }
+
+    /// Connect a method with any `&mut Gd<OtherC>` as the first parameter (user + engine classes).
+    ///
+    /// The parameter `object` can be of 2 different "categories":
+    /// - Any `&Gd<OtherC>` (e.g.: `&Gd<Node>`, `&Gd<MyClass>`).
+    /// - `&OtherC`, as long as `OtherC` is a user class that contains a `Base<T>` field (it implements the
+    ///   [`WithBaseField`](crate::obj::WithBaseField) trait).
+    ///
+    /// # Related APIs
+    /// - To connect to methods on the object that owns this signal, use [`connect_self_gd()`][Self::connect_self_gd].
+    /// - If you need [connect flags](ConnectFlags), call [`flags()`](Self::flags) before this.
+    /// - If you need cross-thread signals, use [`connect_sync()`](#method.connect_sync) instead (requires feature "experimental-threads").
+    pub fn connect_other_gd<F, OtherC>(
+        self,
+        object: &impl ObjectToOwned<OtherC>,
+        mut method: F,
+    ) -> ConnectHandle
+    where
+        OtherC: GodotClass,
+        F: SignalReceiver<Gd<OtherC>, Ps>,
+        for<'c_rcv> IndirectSignalReceiver<'c_rcv, Gd<OtherC>, Ps, F>: From<&'c_rcv mut F>,
+    {
+        let gd = object.object_to_owned();
+
+        let godot_fn = make_godot_fn(move |args| {
+            IndirectSignalReceiver::from(&mut method)
+                .function()
+                .call(gd.clone(), args);
+        });
+
+        self.inner_connect_godot_fn::<F>(godot_fn, &object.object_to_owned())
+    }
+
+    /// Connect to this signal using a thread-safe function, allows the signal to be called across threads.
+    ///
+    /// Requires `Send` + `Sync` bounds on the provided function `F`, and is only available for the `experimental-threads`
+    /// Cargo feature.
+    ///
+    /// If you need [connect flags](ConnectFlags), call [`flags()`](Self::flags) before this.
     #[cfg(feature = "experimental-threads")]
-    sync_callable: Option<Callable>,
-}
+    pub fn connect_sync<F>(self, mut function: F)
+    where
+        // Why both Send+Sync: closure can not only impact another thread (Sync), but it's also possible to share such Callables across threads
+        // (Send) or even call them from multiple threads (Sync). We don't differentiate the fine-grained needs, it's either thread-safe or not.
+        for<'c_rcv> F: SignalReceiver<(), Ps> + Send + Sync,
+        for<'c_rcv> IndirectSignalReceiver<'c_rcv, (), Ps, F>: From<&'c_rcv mut F>,
+    {
+        let godot_fn = make_godot_fn(move |args| {
+            IndirectSignalReceiver::from(&mut function)
+                .function()
+                .call((), args);
+        });
 
-impl BuilderData {
-    fn with_callable_name<F>(mut self) -> Self {
-        self.callable_name = Some(make_callable_name::<F>());
-        self
+        let callable_name = match &self.data.callable_name {
+            Some(user_provided_name) => user_provided_name,
+            None => &make_callable_name::<F>(),
+        };
+
+        let callable = Callable::from_sync_fn(callable_name, godot_fn);
+        self.parent_sig
+            .inner_connect_untyped(callable, self.data.connect_flags);
     }
-
-    fn callable_name_ref(&self) -> &GString {
-        self.callable_name
-            .as_ref()
-            .expect("Signal connect name not set; this is a bug.")
-    }
-}
-
-// ----------------------------------------------------------------------------------------------------------------------------------------------
-
-pub(super) fn make_godot_fn<Ps, F>(mut input: F) -> impl FnMut(&[&Variant]) -> Result<Variant, ()>
-where
-    F: FnMut(Ps),
-    Ps: meta::ParamTuple,
-{
-    move |variant_args: &[&Variant]| -> Result<Variant, ()> {
-        let args = Ps::from_variant_array(variant_args);
-        input(args);
-
-        Ok(Variant::nil())
-    }
-}
-
-pub(super) fn make_callable_name<F>() -> GString {
-    // When using sys::short_type_name() in the future, make sure global "func" and member "MyClass::func" are rendered as such.
-    // PascalCase heuristic should then be good enough.
-
-    std::any::type_name::<F>().into()
 }

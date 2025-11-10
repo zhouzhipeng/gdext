@@ -5,13 +5,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use godot::builtin::{Variant, Vector3};
+use std::error::Error;
+use std::sync::{Arc, Mutex};
+
+use godot::builtin::{vslice, Variant, Vector3};
 use godot::classes::{Node, Node3D, Object};
+use godot::init::GdextBuild;
 use godot::meta::error::CallError;
 use godot::meta::{FromGodot, ToGodot};
 use godot::obj::{InstanceId, NewAlloc};
-use std::error::Error;
-use std::sync::{Arc, Mutex};
 
 use crate::framework::{expect_panic, itest, runs_release};
 use crate::object_tests::object_test::ObjPayload;
@@ -35,7 +37,7 @@ fn dynamic_call_with_args() {
 
     let expected_pos = Vector3::new(2.5, 6.42, -1.11);
 
-    let none = node.call("set_position", &[expected_pos.to_variant()]);
+    let none = node.call("set_position", vslice![expected_pos]);
     let actual_pos = node.call("get_position", &[]);
 
     assert_eq!(none, Variant::nil());
@@ -93,12 +95,12 @@ fn dynamic_call_with_too_many_args() {
 
     // Use panicking version.
     expect_panic("call with too many arguments", || {
-        obj.call("take_1_int", &[42.to_variant(), 43.to_variant()]);
+        obj.call("take_1_int", vslice![42, 43]);
     });
 
     // Use Result-based version.
     let call_error = obj
-        .try_call("take_1_int", &[42.to_variant(), 43.to_variant()])
+        .try_call("take_1_int", vslice![42, 43])
         .expect_err("expected failed call");
 
     assert_eq!(call_error.class_name(), Some("Object"));
@@ -119,12 +121,12 @@ fn dynamic_call_parameter_mismatch() {
 
     // Use panicking version.
     expect_panic("call with wrong argument type", || {
-        obj.call("take_1_int", &["string".to_variant()]);
+        obj.call("take_1_int", vslice!["string"]);
     });
 
     // Use Result-based version.
     let call_error = obj
-        .try_call("take_1_int", &["string".to_variant()])
+        .try_call("take_1_int", vslice!["string"])
         .expect_err("expected failed call");
 
     assert_eq!(call_error.class_name(), Some("Object"));
@@ -140,7 +142,7 @@ fn dynamic_call_parameter_mismatch() {
     obj.free();
 }
 
-// There seems to be a weird bug where running *only* this test with #[itest(focus)] causes panic, which then causes a
+// There seems to be a weird bug where running *only* this test with #[itest (focus)] causes panic, which then causes a
 // follow-up failure of Gd::bind_mut(), preventing benchmarks from being run. Doesn't happen with #[itest], when running all.
 #[itest]
 fn dynamic_call_with_panic() {
@@ -150,7 +152,7 @@ fn dynamic_call_with_panic() {
     std::panic::set_hook(Box::new(move |panic_info| {
         let error_message = godot::private::format_panic_message(panic_info);
         *panic_message_clone.lock().unwrap() =
-            Some((error_message, godot::private::get_gdext_panic_context()));
+            Some((error_message, godot::private::fetch_last_panic_context()));
     }));
 
     let mut obj = ObjPayload::new_alloc();
@@ -163,7 +165,7 @@ fn dynamic_call_with_panic() {
 
     let expected_error_message = "godot-rust function call failed: Object::call(&\"do_panic\")\
         \n  Source: ObjPayload::do_panic()\
-        \n    Reason: do_panic exploded"
+        \n    Reason: function panicked: do_panic exploded 💥"
         .to_string();
 
     assert_eq!(call_error.to_string(), expected_error_message);
@@ -185,12 +187,12 @@ fn dynamic_call_with_panic() {
         .map(|context| format!("\n  Context: {context}"))
         .unwrap_or_default();
 
-    // In Debug, there is a context -> message is multi-line -> '\n' is inserted after [panic ...].
-    // In Release, simpler message -> single line -> no '\n'.
-    let expected_panic_message = if cfg!(debug_assertions) {
-        format!("[panic {path}:{line}]\n  do_panic exploded{context}")
+    // In strict level, there is a context -> message is multi-line -> '\n' is inserted after [panic ...].
+    // In balanced+disengaged level, simpler message -> single line -> no '\n'.
+    let expected_panic_message = if cfg!(safeguards_strict) {
+        format!("[panic {path}:{line}]\n  do_panic exploded 💥{context}")
     } else {
-        format!("[panic {path}:{line}]  do_panic exploded")
+        format!("[panic {path}:{line}]  do_panic exploded 💥")
     };
 
     assert_eq!(panic_message, expected_panic_message);
@@ -205,7 +207,7 @@ fn dynamic_call_with_panic() {
 fn dynamic_call_with_too_few_args_engine() {
     // Disabled in release (parameter count is unchecked by engine).
     // Before 4.2, the Godot check had a bug: https://github.com/godotengine/godot/pull/80844.
-    if runs_release() || cfg!(before_api = "4.2") {
+    if runs_release() {
         return;
     }
 
@@ -213,12 +215,12 @@ fn dynamic_call_with_too_few_args_engine() {
 
     // Use panicking version.
     expect_panic("call with too few arguments", || {
-        node.call("rpc_config", &["some_method".to_variant()]);
+        node.call("rpc_config", vslice!["some_method"]);
     });
 
     // Use Result-based version.
     let call_error = node
-        .try_call("rpc_config", &["some_method".to_variant()])
+        .try_call("rpc_config", vslice!["some_method"])
         .expect_err("expected failed call");
 
     assert_eq!(call_error.class_name(), Some("Object"));
@@ -236,7 +238,7 @@ fn dynamic_call_with_too_few_args_engine() {
 fn dynamic_call_with_too_many_args_engine() {
     // Disabled in release (parameter count is unchecked by engine).
     // Before 4.2, the Godot check had a bug: https://github.com/godotengine/godot/pull/80844.
-    if runs_release() || cfg!(before_api = "4.2") {
+    if runs_release() {
         return;
     }
 
@@ -244,18 +246,12 @@ fn dynamic_call_with_too_many_args_engine() {
 
     // Use panicking version.
     expect_panic("call with too many arguments", || {
-        node.call(
-            "rpc_config",
-            &["some_method".to_variant(), Variant::nil(), 123.to_variant()],
-        );
+        node.call("rpc_config", vslice!["some_method", Variant::nil(), 123]);
     });
 
     // Use Result-based version.
     let call_error = node
-        .try_call(
-            "rpc_config",
-            &["some_method".to_variant(), Variant::nil(), 123.to_variant()],
-        )
+        .try_call("rpc_config", vslice!["some_method", Variant::nil(), 123])
         .expect_err("expected failed call");
 
     assert_eq!(call_error.class_name(), Some("Object"));
@@ -280,22 +276,30 @@ fn dynamic_call_parameter_mismatch_engine() {
 
     // Use panicking version.
     expect_panic("call with wrong argument type", || {
-        node.call("set_name", &[123.to_variant()]);
+        node.call("set_name", vslice![123]);
     });
 
     // Use Result-based version.
     let call_error = node
-        .try_call("set_name", &[123.to_variant()])
+        .try_call("set_name", vslice![123])
         .expect_err("expected failed call");
+
+    // Node::set_name() changed to accept StringName, in https://github.com/godotengine/godot/pull/76560.
+    // Needs to check the runtime version rather than API version, because reflection calls always latest method (no compatibility method).
+    let target_type = if GdextBuild::before_api("4.5") {
+        "STRING"
+    } else {
+        "STRING_NAME"
+    };
+    let expected_error = format!(
+        "godot-rust function call failed: Object::call(&\"set_name\", [va] 123)\
+        \n    Reason: parameter #1 -- cannot convert from INT to {target_type}"
+    );
 
     // Note: currently no mention of Node::set_name(). Not sure if easily possible to add.
     assert_eq!(call_error.class_name(), Some("Object"));
     assert_eq!(call_error.method_name(), "call");
-    assert_eq!(
-        call_error.to_string(),
-        "godot-rust function call failed: Object::call(&\"set_name\", [va] 123)\
-        \n    Reason: parameter #1 -- cannot convert from INT to STRING"
-    );
+    assert_eq!(call_error.to_string(), expected_error);
 
     node.free();
 }

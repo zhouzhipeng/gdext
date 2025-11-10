@@ -5,9 +5,44 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::meta::ClassName;
-use crate::registry::plugin::{ITraitImpl, InherentImpl, PluginItem, Struct};
 use std::collections::HashMap;
+
+use crate::meta::ClassId;
+use crate::obj::GodotClass;
+
+/// Piece of information that is gathered by the self-registration ("plugin") system.
+///
+/// You should not manually construct this struct, but rather use [`DocsPlugin::new()`].
+#[derive(Debug)]
+pub struct DocsPlugin {
+    /// The name of the class to register docs for.
+    class_name: ClassId,
+
+    /// The actual item being registered.
+    item: DocsItem,
+}
+
+impl DocsPlugin {
+    /// Creates a new `DocsPlugin`, automatically setting the `class_name` to the values defined in [`GodotClass`].
+    pub fn new<T: GodotClass>(item: DocsItem) -> Self {
+        Self {
+            class_name: T::class_id(),
+            item,
+        }
+    }
+}
+
+type ITraitImplDocs = &'static str;
+
+#[derive(Debug)]
+pub enum DocsItem {
+    /// Docs for `#[derive(GodotClass)] struct MyClass`.
+    Struct(StructDocs),
+    /// Docs for `#[godot_api] impl MyClass`.
+    InherentImpl(InherentImplDocs),
+    /// Docs for `#[godot_api] impl ITrait for MyClass`.
+    ITraitImpl(ITraitImplDocs),
+}
 
 /// Created for documentation on
 /// ```ignore
@@ -19,14 +54,16 @@ use std::collections::HashMap;
 /// }
 /// ```
 /// All fields are XML parts, escaped where necessary.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct StructDocs {
     pub base: &'static str,
     pub description: &'static str,
-    pub members: &'static str,
+    pub experimental: &'static str,
+    pub deprecated: &'static str,
+    pub properties: &'static str,
 }
 
-/// Keeps documentation for inherent `impl` blocks, such as:
+/// Keeps documentation for inherent `impl` blocks (primary and secondary), such as:
 /// ```ignore
 /// #[godot_api]
 /// impl Struct {
@@ -43,18 +80,22 @@ pub struct StructDocs {
 /// }
 /// ```
 /// All fields are XML parts, escaped where necessary.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Default, Clone, Debug)]
 pub struct InherentImplDocs {
-    pub methods: &'static str,
-    pub signals_block: &'static str,
-    pub constants_block: &'static str,
+    pub methods_xml: &'static str,
+    pub signals_xml: &'static str,
+    pub constants_xml: &'static str,
 }
 
+/// Godot editor documentation for a class, combined from individual definitions (struct + impls).
+///
+/// All fields are collections of XML parts, escaped where necessary.
 #[derive(Default)]
-struct DocPieces {
+struct AggregatedDocs {
     definition: StructDocs,
-    inherent: InherentImplDocs,
-    virtual_methods: &'static str,
+    methods_xmls: Vec<&'static str>,
+    signals_xmls: Vec<&'static str>,
+    constants_xmls: Vec<&'static str>,
 }
 
 /// This function scours the registered plugins to find their documentation pieces,
@@ -72,64 +113,79 @@ struct DocPieces {
 /// strings of not-yet-parented XML tags (or empty string if no method has been documented).
 #[doc(hidden)]
 pub fn gather_xml_docs() -> impl Iterator<Item = String> {
-    let mut map = HashMap::<ClassName, DocPieces>::new();
-    crate::private::iterate_plugins(|x| {
-        let class_name = x.class_name;
+    let mut map = HashMap::<ClassId, AggregatedDocs>::new();
 
-        match x.item {
-            PluginItem::InherentImpl(InherentImpl { docs, .. }) => {
-                map.entry(class_name).or_default().inherent = docs
+    crate::private::iterate_docs_plugins(|shard| {
+        let class_name = shard.class_name;
+        match &shard.item {
+            DocsItem::Struct(struct_docs) => {
+                map.entry(class_name).or_default().definition = *struct_docs;
             }
 
-            PluginItem::ITraitImpl(ITraitImpl {
-                virtual_method_docs,
-                ..
-            }) => map.entry(class_name).or_default().virtual_methods = virtual_method_docs,
+            DocsItem::InherentImpl(trait_docs) => {
+                map.entry(class_name)
+                    .or_default()
+                    .methods_xmls
+                    .push(trait_docs.methods_xml);
 
-            PluginItem::Struct(Struct {
-                docs: Some(docs), ..
-            }) => map.entry(class_name).or_default().definition = docs,
+                map.entry(class_name)
+                    .and_modify(|pieces| pieces.constants_xmls.push(trait_docs.constants_xml));
 
-            _ => (),
+                map.entry(class_name)
+                    .and_modify(|pieces| pieces.signals_xmls.push(trait_docs.signals_xml));
+            }
+
+            DocsItem::ITraitImpl(methods_xml) => {
+                map.entry(class_name)
+                    .or_default()
+                    .methods_xmls
+                    .push(methods_xml);
+            }
         }
     });
 
     map.into_iter().map(|(class, pieces)| {
-            let StructDocs {
-                base,
-                description,
-                members,
-            } = pieces.definition;
+        let StructDocs {
+            base,
+            description,
+            experimental,
+            deprecated,
+            properties,
+        } = pieces.definition;
 
-            let InherentImplDocs {
-                methods,
-                signals_block,
-                constants_block,
-            } = pieces.inherent;
+        let methods_block = wrap_in_xml_block("methods", pieces.methods_xmls);
+        let signals_block = wrap_in_xml_block("signals", pieces.signals_xmls);
+        let constants_block = wrap_in_xml_block("constants", pieces.constants_xmls);
 
-            let virtual_methods = pieces.virtual_methods;
-            let methods_block = (virtual_methods.is_empty() && methods.is_empty())
-                .then(String::new)
-                .unwrap_or_else(|| format!("<methods>{methods}{virtual_methods}</methods>"));
+        let (brief, description) = match description.split_once("[br]") {
+            Some((brief, description)) => (brief, description.trim_start_matches("[br]")),
+            None => (description, ""),
+        };
 
-            let (brief, mut description) = match description
-                .split_once("[br]") {
-                    Some((brief, description)) => (brief, description),
-                    None => (description, ""),
-                };
-            description = description.trim_start_matches("[br]");
-
-            format!(r#"<?xml version="1.0" encoding="UTF-8"?>
-<class name="{class}" inherits="{base}" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+        format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<class name="{class}" inherits="{base}"{deprecated}{experimental} xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 <brief_description>{brief}</brief_description>
 <description>{description}</description>
 {methods_block}
 {constants_block}
 {signals_block}
-<members>{members}</members>
+<members>{properties}</members>
 </class>"#)
-        },
-        )
+    })
+}
+
+fn wrap_in_xml_block(tag: &str, mut blocks: Vec<&'static str>) -> String {
+    // We sort the blocks for deterministic output. No need to sort individual methods/signals/constants, this is already done by Godot.
+    // See https://github.com/godot-rust/gdext/pull/1391 for more information.
+    blocks.sort();
+
+    let content = String::from_iter(blocks);
+
+    if content.is_empty() {
+        String::new()
+    } else {
+        format!("<{tag}>{content}</{tag}>")
+    }
 }
 
 /// # Safety

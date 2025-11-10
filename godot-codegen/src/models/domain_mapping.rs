@@ -5,22 +5,26 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::collections::HashMap;
+
+use proc_macro2::Ident;
+
 use crate::context::Context;
 use crate::models::domain::{
     BuildConfiguration, BuiltinClass, BuiltinMethod, BuiltinSize, BuiltinVariant, Class,
-    ClassCommons, ClassConstant, ClassConstantValue, ClassMethod, Constructor, Enum, Enumerator,
-    EnumeratorValue, ExtensionApi, FnDirection, FnParam, FnQualifier, FnReturn, FunctionCommon,
-    GodotApiVersion, ModName, NativeStructure, Operator, Singleton, TyName, UtilityFunction,
+    ClassCommons, ClassConstant, ClassConstantValue, ClassMethod, ClassSignal, Constructor, Enum,
+    EnumReplacements, Enumerator, EnumeratorValue, ExtensionApi, FnDirection, FnParam, FnQualifier,
+    FnReturn, FunctionCommon, GodotApiVersion, ModName, NativeStructure, Operator, RustTy,
+    Singleton, TyName, UtilityFunction,
 };
 use crate::models::json::{
     JsonBuiltinClass, JsonBuiltinMethod, JsonBuiltinSizes, JsonClass, JsonClassConstant,
     JsonClassMethod, JsonConstructor, JsonEnum, JsonEnumConstant, JsonExtensionApi, JsonHeader,
-    JsonMethodReturn, JsonNativeStructure, JsonOperator, JsonSingleton, JsonUtilityFunction,
+    JsonMethodArg, JsonMethodReturn, JsonNativeStructure, JsonOperator, JsonSignal, JsonSingleton,
+    JsonUtilityFunction,
 };
 use crate::util::{get_api_level, ident, option_as_slice};
 use crate::{conv, special_cases};
-use proc_macro2::Ident;
-use std::collections::HashMap;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Top-level
@@ -90,6 +94,11 @@ impl Class {
         // Already checked in is_class_deleted(), but code remains more maintainable if those are separate, and it's cheap to validate.
         let is_experimental = special_cases::is_class_experimental(&ty_name.godot_ty);
 
+        let is_instantiable = special_cases::is_class_instantiable(&ty_name) //.
+            .unwrap_or(json.is_instantiable);
+
+        let is_final = ctx.is_final(&ty_name);
+
         let mod_name = ModName::from_godot(&ty_name.godot_ty);
 
         let constants = option_as_slice(&json.constants)
@@ -113,19 +122,34 @@ impl Class {
             })
             .collect();
 
+        let signals = option_as_slice(&json.signals)
+            .iter()
+            .filter_map(|s| {
+                let surrounding_class = &ty_name;
+                ClassSignal::from_json(s, surrounding_class, ctx)
+            })
+            .collect();
+
+        let base_class = json
+            .inherits
+            .as_ref()
+            .map(|godot_name| TyName::from_godot(godot_name));
+
         Some(Self {
             common: ClassCommons {
                 name: ty_name,
                 mod_name,
             },
             is_refcounted: json.is_refcounted,
-            is_instantiable: json.is_instantiable,
+            is_instantiable,
             is_experimental,
-            inherits: json.inherits.clone(),
+            is_final,
+            base_class,
             api_level: get_api_level(json),
             constants,
             enums,
             methods,
+            signals,
         })
     }
 }
@@ -306,7 +330,7 @@ impl BuildConfiguration {
             "float_64" => Self::Float64,
             "double_32" => Self::Double32,
             "double_64" => Self::Double64,
-            _ => panic!("invalid build configuration: {}", json),
+            _ => panic!("invalid build configuration: {json}"),
         }
     }
 }
@@ -342,10 +366,17 @@ impl BuiltinMethod {
             return None;
         }
 
-        let return_value = method
-            .return_type
-            .as_deref()
-            .map(JsonMethodReturn::from_type_no_meta);
+        let return_value = if let Some(generic) =
+            special_cases::builtin_method_generic_ret(builtin_name, method)
+        {
+            generic
+        } else {
+            let return_value = &method
+                .return_type
+                .as_deref()
+                .map(JsonMethodReturn::from_type_no_meta);
+            FnReturn::new(return_value, ctx)
+        };
 
         Some(Self {
             common: FunctionCommon {
@@ -354,11 +385,14 @@ impl BuiltinMethod {
                 godot_name: method.name.clone(),
                 // Disable default parameters for builtin classes.
                 // They are not public-facing and need more involved implementation (lifetimes etc.). Also reduces number of symbols in API.
-                parameters: FnParam::new_range_no_defaults(&method.arguments, ctx),
-                return_value: FnReturn::new(&return_value, ctx),
+                parameters: FnParam::builder()
+                    .no_defaults()
+                    .build_many(&method.arguments, ctx),
+                return_value,
                 is_vararg: method.is_vararg,
                 is_private: false, // See 'exposed' below. Could be special_cases::is_method_private(builtin_name, &method.name),
                 is_virtual_required: false,
+                is_unsafe: false, // Builtin methods don't use raw pointers.
                 direction: FnDirection::Outbound {
                     hash: method.hash.expect("hash absent for builtin method"),
                 },
@@ -406,7 +440,7 @@ impl ClassMethod {
 
         Self::from_json_inner(
             method,
-            rust_method_name,
+            rust_method_name.as_ref(),
             class_name,
             FnDirection::Outbound { hash },
             ctx,
@@ -441,6 +475,7 @@ impl ClassMethod {
             },
         };
 
+        // May still be renamed further, for unsafe methods. Not done here because data to determine safety is not available yet.
         let rust_method_name = Self::make_virtual_method_name(class_name, &method.name);
 
         Self::from_json_inner(method, rust_method_name, class_name, direction, ctx)
@@ -458,7 +493,6 @@ impl ClassMethod {
         }
 
         let is_private = special_cases::is_method_private(class_name, &method.name);
-
         let godot_method_name = method.name.clone();
 
         let qualifier = {
@@ -473,29 +507,63 @@ impl ClassMethod {
 
         // Since Godot 4.4, GDExtension advertises whether virtual methods have a default implementation or are required to be overridden.
         #[cfg(before_api = "4.4")]
-        let is_virtual_required = special_cases::is_virtual_method_required(
-            &class_name.rust_ty.to_string(),
-            rust_method_name,
-        );
+        let is_virtual_required =
+            special_cases::is_virtual_method_required(&class_name, &method.name);
 
         #[cfg(since_api = "4.4")]
-        let is_virtual_required = method.is_virtual
-            && method.is_required.unwrap_or_else(|| {
+        #[allow(clippy::let_and_return)]
+        let is_virtual_required = method.is_virtual && {
+            // Evaluate this always first (before potential manual overrides), to detect mistakes in spec.
+            let is_required_in_json = method.is_required.unwrap_or_else(|| {
                 panic!(
                     "virtual method {}::{} lacks field `is_required`",
                     class_name.rust_ty, rust_method_name
                 );
             });
 
+            // Potential special cases come here. The situation "virtual function is required in base class, but not in derived"
+            // is not handled here, but in virtual_traits.rs. Here, virtual methods appear only once, in their base.
+
+            is_required_in_json
+        };
+
+        // Ensure that parameters/return types listed in the replacement truly exist in the method.
+        // The validation function now returns the validated replacement slice for reuse.
+        let enum_replacements = validate_enum_replacements(
+            class_name,
+            &method.name,
+            option_as_slice(&method.arguments),
+            method.return_value.is_some(),
+        );
+
+        let parameters = FnParam::builder()
+            .enum_replacements(enum_replacements)
+            .build_many(&method.arguments, ctx);
+
+        let return_value =
+            FnReturn::with_enum_replacements(&method.return_value, enum_replacements, ctx);
+
+        let is_unsafe = Self::function_uses_pointers(&parameters, &return_value);
+
+        // Future note: if further changes are made to the virtual method name, make sure to make it reversible so that #[godot_api]
+        // can match on the Godot name of the virtual method.
+        let rust_method_name = if is_unsafe && method.is_virtual {
+            // If the method is unsafe, we need to rename it to avoid conflicts with the safe version.
+            conv::make_unsafe_virtual_fn_name(rust_method_name)
+        } else {
+            rust_method_name.to_string()
+        };
+
         Some(Self {
             common: FunctionCommon {
-                name: rust_method_name.to_string(),
+                name: rust_method_name,
                 godot_name: godot_method_name,
-                parameters: FnParam::new_range(&method.arguments, ctx),
-                return_value: FnReturn::new(&method.return_value, ctx),
+                parameters,
+                return_value,
                 is_vararg: method.is_vararg,
                 is_private,
                 is_virtual_required,
+                is_unsafe,
                 direction,
             },
             qualifier,
@@ -504,12 +572,46 @@ impl ClassMethod {
     }
 
     fn make_virtual_method_name<'m>(class_name: &TyName, godot_method_name: &'m str) -> &'m str {
-        // Remove leading underscore from virtual method names.
-        let method_name = godot_method_name
-            .strip_prefix('_')
-            .unwrap_or(godot_method_name);
+        // Hardcoded overrides.
+        if let Some(rust_name) =
+            special_cases::maybe_rename_virtual_method(class_name, godot_method_name)
+        {
+            return rust_name;
+        }
 
-        special_cases::maybe_rename_virtual_method(class_name, method_name)
+        // In general, just rlemove leading underscore from virtual method names.
+        godot_method_name
+            .strip_prefix('_')
+            .unwrap_or(godot_method_name)
+    }
+
+    fn function_uses_pointers(parameters: &[FnParam], return_value: &FnReturn) -> bool {
+        let has_pointer_params = parameters
+            .iter()
+            .any(|param| matches!(param.type_, RustTy::RawPointer { .. }));
+
+        let has_pointer_return = matches!(return_value.type_, Some(RustTy::RawPointer { .. }));
+
+        // No short-circuiting due to variable decls, but that's fine.
+        has_pointer_params || has_pointer_return
+    }
+}
+
+impl ClassSignal {
+    pub fn from_json(
+        json_signal: &JsonSignal,
+        surrounding_class: &TyName,
+        ctx: &mut Context,
+    ) -> Option<Self> {
+        if special_cases::is_signal_deleted(surrounding_class, json_signal) {
+            return None;
+        }
+
+        Some(Self {
+            name: json_signal.name.clone(),
+            parameters: FnParam::builder().build_many(&json_signal.arguments, ctx),
+            surrounding_class: surrounding_class.clone(),
+        })
     }
 }
 
@@ -518,6 +620,7 @@ impl UtilityFunction {
         if special_cases::is_utility_function_deleted(function, ctx) {
             return None;
         }
+        let is_private = special_cases::is_utility_function_private(function);
 
         // Some vararg functions like print() or str() are declared with a single argument "arg1: Variant", but that seems
         // to be a mistake. We change their parameter list by removing that.
@@ -525,7 +628,7 @@ impl UtilityFunction {
         let parameters = if function.is_vararg && args.len() == 1 && args[0].name == "arg1" {
             vec![]
         } else {
-            FnParam::new_range(&function.arguments, ctx)
+            FnParam::builder().build_many(&function.arguments, ctx)
         };
 
         let godot_method_name = function.name.clone();
@@ -543,8 +646,9 @@ impl UtilityFunction {
                 parameters,
                 return_value: FnReturn::new(&return_value, ctx),
                 is_vararg: function.is_vararg,
-                is_private: false,
+                is_private,
                 is_virtual_required: false,
+                is_unsafe: false, // Utility functions don't use raw pointers.
                 direction: FnDirection::Outbound {
                     hash: function.hash,
                 },
@@ -583,7 +687,7 @@ impl Enum {
             conv::make_enumerator_names(godot_class_name, &rust_enum_name, godot_enumerator_names)
         };
 
-        let enumerators = json_enum
+        let enumerators: Vec<Enumerator> = json_enum
             .values
             .iter()
             .zip(rust_enumerator_names)
@@ -591,6 +695,8 @@ impl Enum {
                 Enumerator::from_json(json_constant, rust_name, is_bitfield)
             })
             .collect();
+
+        let max_index = Enum::find_index_enum_max_impl(is_bitfield, &enumerators);
 
         Self {
             name: ident(&rust_enum_name),
@@ -600,6 +706,7 @@ impl Enum {
             is_private,
             is_exhaustive,
             enumerators,
+            max_index,
         }
     }
 }
@@ -654,13 +761,56 @@ impl ClassConstant {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
+
+/// Validates that all parameters and non-unit return types declared in an enum replacement slices actually exist in the method.
+///
+/// This is a measure to prevent accidental typos or listing inexistent parameters, which would have no effect.
+fn validate_enum_replacements(
+    class_ty: &TyName,
+    godot_method_name: &str,
+    method_arguments: &[JsonMethodArg],
+    has_return_type: bool,
+) -> EnumReplacements {
+    let replacements =
+        special_cases::get_class_method_param_enum_replacement(class_ty, godot_method_name);
+
+    for (param_name, enum_name, _) in replacements {
+        if param_name.is_empty() {
+            assert!(has_return_type,
+                "Method `{class}.{godot_method_name}` has no return type, but replacement with `{enum_name}` is declared",
+                class = class_ty.godot_ty
+            );
+        } else if !method_arguments.iter().any(|arg| arg.name == *param_name) {
+            let available_params = method_arguments
+                .iter()
+                .map(|arg| format!("  * {}: {}", arg.name, arg.type_))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            panic!(
+                "Method `{class}.{godot_method_name}` has no parameter `{param_name}`, but a replacement with `{enum_name}` is declared\n\
+                \n{count} parameters available:\n{available_params}\n",
+                class = class_ty.godot_ty, count = method_arguments.len(),
+            );
+        }
+    }
+
+    replacements
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 // Native structures
 
 impl NativeStructure {
     pub fn from_json(json: &JsonNativeStructure) -> Self {
+        // Some native-struct definitions are incorrect in earlier Godot versions; this backports corrections.
+        let format = special_cases::get_native_struct_definition(&json.name)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| json.format.clone());
+
         Self {
             name: json.name.clone(),
-            format: json.format.clone(),
+            format,
         }
     }
 }

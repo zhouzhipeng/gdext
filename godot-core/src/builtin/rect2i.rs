@@ -7,10 +7,10 @@
 
 use std::cmp;
 
-use crate::builtin::{Rect2, Side, Vector2i};
-
 use godot_ffi as sys;
-use sys::{ffi_methods, GodotFfi};
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
+
+use crate::builtin::{Rect2, Side, Vector2i};
 
 /// 2D axis-aligned integer bounding box.
 ///
@@ -28,10 +28,13 @@ use sys::{ffi_methods, GodotFfi};
 ///
 /// [`Aabb`]: crate::builtin::Aabb
 ///
-/// # Godot docs
+/// # Soft invariants
+/// `Rect2i` requires non-negative size for certain operations, which is validated only on a best-effort basis. Violations may
+/// cause panics in Debug mode. See also [_Builtin API design_](../__docs/index.html#6-public-fields-and-soft-invariants).
 ///
+/// # Godot docs
 /// [`Rect2i` (stable)](https://docs.godotengine.org/en/stable/classes/class_rect2i.html)
-#[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Default, Copy, Clone, Eq, PartialEq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Rect2i {
@@ -71,12 +74,6 @@ impl Rect2i {
         }
     }
 
-    #[deprecated = "Moved to `Rect2::cast_int()`"]
-    #[inline]
-    pub const fn from_rect2(rect: Rect2) -> Self {
-        rect.cast_int()
-    }
-
     /// Create a new `Rect2` from a `Rect2i`, using `as` for `i32` to `real` conversions.
     ///
     /// _Godot equivalent: `Rect2(Rect2i from)`_
@@ -89,17 +86,12 @@ impl Rect2i {
     }
 
     /// The end of the `Rect2i` calculated as `position + size`.
-    ///
-    /// _Godot equivalent: `Rect2i.size` property_
-    #[doc(alias = "size")]
     #[inline]
     pub const fn end(self) -> Vector2i {
         Vector2i::new(self.position.x + self.size.x, self.position.y + self.size.y)
     }
 
-    /// Set size based on desired end-point.
-    ///
-    /// _Godot equivalent: `Rect2i.size` property_
+    /// Set end of the `Rect2i`, updating `size = end - position`.
     #[inline]
     pub fn set_end(&mut self, end: Vector2i) {
         self.size = end - self.position
@@ -116,8 +108,7 @@ impl Rect2i {
 
     /// Returns `true` if this `Rect2i` completely encloses another one.
     ///
-    /// Any `Rect2i` encloses itself, i.e. an enclosed `Rect2i` does is not required to be a
-    /// proper sub-rect.
+    /// Any `Rect2i` encloses itself, i.e. an enclosed `Rect2i` does is not required to be a proper sub-rect.
     #[inline]
     pub const fn encloses(self, other: Self) -> bool {
         self.assert_nonnegative();
@@ -243,11 +234,6 @@ impl Rect2i {
         Some(Self::from_corners(new_pos, new_end))
     }
 
-    #[deprecated = "Renamed to `intersect()`"]
-    pub fn intersection(self, b: Self) -> Option<Self> {
-        self.intersect(b)
-    }
-
     /// Returns `true` if the `Rect2i` overlaps with `b` (i.e. they have at least one
     /// point in common)
     #[inline]
@@ -293,14 +279,12 @@ impl Rect2i {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Rect2i {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::RECT2I
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::RECT2I);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(Rect2i);
+crate::meta::impl_godot_as_self!(Rect2i: ByValue);
 
 impl std::fmt::Display for Rect2i {
     /// Formats `Rect2i` to match Godot's string representation.

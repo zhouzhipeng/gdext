@@ -5,23 +5,22 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-#[cfg(not(feature = "experimental-threads"))]
-use godot_cell::panicking::{InaccessibleGuard, MutGuard, RefGuard};
-
-#[cfg(feature = "experimental-threads")]
-use godot_cell::blocking::{InaccessibleGuard, MutGuard, RefGuard};
-
-use godot_ffi::out;
-
 use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
 
+#[cfg(feature = "experimental-threads")]
+use godot_cell::blocking::{InaccessibleGuard, MutGuard, RefGuard};
+#[cfg(not(feature = "experimental-threads"))]
+use godot_cell::panicking::{InaccessibleGuard, MutGuard, RefGuard};
+use godot_ffi::out;
+
 use crate::obj::script::ScriptInstance;
-use crate::obj::{AsDyn, Gd, GodotClass};
+use crate::obj::{AsDyn, Gd, GodotClass, PassiveGd};
 
 /// Immutably/shared bound reference guard for a [`Gd`][crate::obj::Gd] smart pointer.
 ///
 /// See [`Gd::bind`][crate::obj::Gd::bind] for usage.
+// GdRef could technically implement Clone, but it wasn't needed so far.
 #[derive(Debug)]
 pub struct GdRef<'a, T: GodotClass> {
     guard: RefGuard<'a, T>,
@@ -46,8 +45,6 @@ impl<T: GodotClass> Drop for GdRef<'_, T> {
         out!("GdRef drop: {:?}", std::any::type_name::<T>());
     }
 }
-
-// TODO Clone or Share
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -104,7 +101,10 @@ pub struct DynGdRef<'a, D: ?Sized> {
     cached_ptr: *const D,
 }
 
-impl<'a, D: ?Sized> DynGdRef<'a, D> {
+impl<'a, D> DynGdRef<'a, D>
+where
+    D: ?Sized + 'static,
+{
     #[doc(hidden)]
     pub fn from_guard<T: AsDyn<D>>(guard: GdRef<'a, T>) -> Self {
         let obj = &*guard;
@@ -147,7 +147,10 @@ pub struct DynGdMut<'a, D: ?Sized> {
     cached_ptr: *mut D,
 }
 
-impl<'a, D: ?Sized> DynGdMut<'a, D> {
+impl<'a, D> DynGdMut<'a, D>
+where
+    D: ?Sized + 'static,
+{
     #[doc(hidden)]
     pub fn from_guard<T: AsDyn<D>>(mut guard: GdMut<'a, T>) -> Self {
         let obj = &mut *guard;
@@ -195,14 +198,14 @@ macro_rules! make_base_ref {
         #[doc = concat!("This can be used to call methods on the base object of a ", $object_name, " that takes `&self` as the receiver.\n\n")]
         #[doc = concat!("See [`", stringify!($doc_type), "::base()`](", stringify!($doc_path), "::base()) for usage.")]
         pub struct $ident<'a, T: $bound> {
-            gd: Gd<T::Base>,
+            passive_gd: PassiveGd<T::Base>,
             _instance: &'a T,
         }
 
         impl<'a, T: $bound> $ident<'a, T> {
-            pub(crate) fn new(gd: Gd<T::Base>, instance: &'a T) -> Self {
+            pub(crate) fn new(passive_gd: PassiveGd<T::Base>, instance: &'a T) -> Self {
                 Self {
-                    gd,
+                    passive_gd,
                     _instance: instance,
                 }
             }
@@ -212,7 +215,7 @@ macro_rules! make_base_ref {
             type Target = Gd<T::Base>;
 
             fn deref(&self) -> &Gd<T::Base> {
-                &self.gd
+                &self.passive_gd
             }
         }
     };
@@ -228,17 +231,17 @@ macro_rules! make_base_mut {
         ///
         #[doc = concat!("See [`", stringify!($doc_type), "::base_mut()`](", stringify!($doc_path), "::base_mut()) for usage.\n")]
         pub struct $ident<'a, T: $bound> {
-            gd: Gd<T::Base>,
+            passive_gd: PassiveGd<T::Base>,
             _inaccessible_guard: InaccessibleGuard<'a, T>,
         }
 
         impl<'a, T: $bound> $ident<'a, T> {
             pub(crate) fn new(
-                gd: Gd<T::Base>,
+                passive_gd: PassiveGd<T::Base>,
                 inaccessible_guard: InaccessibleGuard<'a, T>,
             ) -> Self {
                 Self {
-                    gd,
+                    passive_gd,
                     _inaccessible_guard: inaccessible_guard,
                 }
             }
@@ -248,13 +251,13 @@ macro_rules! make_base_mut {
             type Target = Gd<T::Base>;
 
             fn deref(&self) -> &Gd<T::Base> {
-                &self.gd
+                &self.passive_gd
             }
         }
 
         impl<T: $bound> DerefMut for $ident<'_, T> {
             fn deref_mut(&mut self) -> &mut Gd<T::Base> {
-                &mut self.gd
+                &mut self.passive_gd
             }
         }
     };

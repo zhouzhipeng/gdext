@@ -12,38 +12,39 @@
 //!
 //! See [`ScriptInstance`](trait.ScriptInstance.html) for usage.
 
-// Re-export guards.
-pub use crate::obj::guards::{ScriptBaseMut, ScriptBaseRef};
-
 use std::ffi::c_void;
 use std::ops::{Deref, DerefMut};
 
+#[cfg(feature = "experimental-threads")]
+use godot_cell::blocking::{GdCell, MutGuard, RefGuard};
 #[cfg(not(feature = "experimental-threads"))]
 use godot_cell::panicking::{GdCell, MutGuard, RefGuard};
 
-#[cfg(feature = "experimental-threads")]
-use godot_cell::blocking::{GdCell, MutGuard, RefGuard};
-
 use crate::builtin::{GString, StringName, Variant, VariantType};
 use crate::classes::{Object, Script, ScriptLanguage};
+use crate::meta::error::CallErrorType;
 use crate::meta::{MethodInfo, PropertyInfo};
 use crate::obj::{Base, Gd, GodotClass};
 use crate::sys;
 
-#[cfg(before_api = "4.3")]
-use self::bounded_ptr_list::BoundedPtrList;
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Public re-exports.
 
-#[cfg(since_api = "4.2")]
-use crate::classes::IScriptExtension;
-#[cfg(since_api = "4.2")]
-use crate::obj::Inherits;
+mod reexport_pub {
+    pub use crate::classes::IScriptExtension;
+    pub use crate::obj::Inherits;
+}
+pub use reexport_pub::*;
+
+// Re-export guards.
+pub use crate::obj::guards::{ScriptBaseMut, ScriptBaseRef};
 
 /// Implement custom scripts that can be attached to objects in Godot.
 ///
 /// To use script instances, implement this trait for your own type.
 ///
-/// You can use the [`create_script_instance()`] function to create a low-level pointer to your script instance.
-/// This pointer should then be returned from [`IScriptExtension::instance_create()`](crate::classes::IScriptExtension::instance_create).
+/// You can use the [`create_script_instance()`] function to create a low-level pointer to your script instance. This pointer should then be
+/// returned from [`IScriptExtension::instance_create_rawptr()`](crate::classes::IScriptExtension::instance_create_rawptr).
 ///
 /// # Example
 ///
@@ -113,12 +114,11 @@ pub trait ScriptInstance: Sized {
     /// mutable method calls like rust.
     ///
     /// It's important that the script does not cause a second call to this function while executing a method call. This would result in a panic.
-    // TODO: map the sys::GDExtensionCallErrorType to some public API type.
     fn call(
         this: SiMut<Self>,
         method: StringName,
         args: &[&Variant],
-    ) -> Result<Variant, sys::GDExtensionCallErrorType>;
+    ) -> Result<Variant, CallErrorType>;
 
     /// Identifies the script instance as a placeholder, routing property writes to a fallback if applicable.
     ///
@@ -169,9 +169,7 @@ pub trait ScriptInstance: Sized {
     fn get_method_argument_count(&self, _method: StringName) -> Option<u32>;
 }
 
-#[cfg(before_api = "4.2")]
-type ScriptInstanceInfo = sys::GDExtensionScriptInstanceInfo;
-#[cfg(all(since_api = "4.2", before_api = "4.3"))]
+#[cfg(before_api = "4.3")]
 type ScriptInstanceInfo = sys::GDExtensionScriptInstanceInfo2;
 #[cfg(since_api = "4.3")]
 type ScriptInstanceInfo = sys::GDExtensionScriptInstanceInfo3;
@@ -259,13 +257,11 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
         #[cfg(since_api = "4.3")]
         free_property_list_func: Some(script_instance_info::free_property_list_func),
 
-        #[cfg(since_api = "4.2")]
         get_class_category_func: None, // not yet implemented.
 
         property_can_revert_func: None, // unimplemented until needed.
         property_get_revert_func: None, // unimplemented until needed.
 
-        // ScriptInstance::get_owner() is apparently not called by Godot 4.1 to 4.2 (to verify).
         get_owner_func: None,
         get_property_state_func: Some(script_instance_info::get_property_state_func::<T>),
 
@@ -275,7 +271,6 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
         #[cfg(since_api = "4.3")]
         free_method_list_func: Some(script_instance_info::free_method_list_func),
         get_property_type_func: Some(script_instance_info::get_property_type_func::<T>),
-        #[cfg(since_api = "4.2")]
         validate_property_func: None, // not yet implemented.
 
         has_method_func: Some(script_instance_info::has_method_func::<T>),
@@ -316,7 +311,7 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
         method_lists: BoundedPtrList::new(),
         // SAFETY: The script instance is always freed before the base object is destroyed. The weak reference should therefore never be
         // accessed after it has been freed.
-        base: unsafe { Base::from_gd(&for_object) },
+        base: unsafe { Base::from_script_gd(&for_object) },
     };
 
     let data_ptr = Box::into_raw(Box::new(data));
@@ -326,10 +321,7 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
     //
     // It is expected that the engine upholds the safety invariants stated on each of the GDEXtensionScriptInstanceInfo functions.
     unsafe {
-        #[cfg(before_api = "4.2")]
-        let create_fn = sys::interface_fn!(script_instance_create);
-
-        #[cfg(all(since_api = "4.2", before_api = "4.3"))]
+        #[cfg(before_api = "4.3")]
         let create_fn = sys::interface_fn!(script_instance_create2);
 
         #[cfg(since_api = "4.3")]
@@ -348,22 +340,16 @@ pub unsafe fn create_script_instance<T: ScriptInstance>(
 /// there is an instance for the script.
 ///
 /// Use this function to implement [`IScriptExtension::instance_has`].
-#[cfg(since_api = "4.2")]
 pub fn script_instance_exists<O, S>(object: &Gd<O>, script: &Gd<S>) -> bool
 where
     O: Inherits<Object>,
     S: Inherits<Script> + IScriptExtension + super::Bounds<Declarer = super::bounds::DeclUser>,
 {
-    let object_script_variant = object.upcast_ref().get_script();
-
-    if object_script_variant.is_nil() {
+    let Some(object_script) = object.upcast_ref().get_script() else {
         return false;
-    }
+    };
 
-    if object_script_variant
-        .object_id()
-        .is_none_or(|instance_id| instance_id != script.instance_id())
-    {
+    if object_script.instance_id() != script.instance_id() {
         return false;
     }
 
@@ -414,7 +400,9 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     /// # use godot::classes::{ScriptLanguage, Script};
     /// # use godot::obj::script::{ScriptInstance, SiMut};
     /// # use godot::meta::{MethodInfo, PropertyInfo};
+    /// # use godot::meta::error::CallErrorType;
     /// # use godot::sys;
+    ///
     /// struct ExampleScriptInstance;
     ///
     /// impl ScriptInstance for ExampleScriptInstance {
@@ -424,7 +412,7 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     ///         this: SiMut<Self>,
     ///         method: StringName,
     ///         args: &[&Variant],
-    ///     ) -> Result<Variant, sys::GDExtensionCallErrorType>{
+    ///     ) -> Result<Variant, CallErrorType>{
     ///         let name = this.base().get_name();
     ///         godot_print!("name is {name}");
     ///         // However, we cannot call methods that require `&mut Base`, such as:
@@ -450,13 +438,17 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     ///     # fn get_method_argument_count(&self, _: StringName) -> Option<u32> { todo!() }
     /// }
     /// ```
-    pub fn base(&self) -> ScriptBaseRef<T> {
-        ScriptBaseRef::new(self.base_ref.to_gd(), self.mut_ref)
+    pub fn base(&self) -> ScriptBaseRef<'_, T> {
+        let passive_gd = self.base_ref.to_script_passive();
+        ScriptBaseRef::new(passive_gd, self.mut_ref)
     }
 
     /// Returns a mutable reference suitable for calling engine methods on this object.
     ///
     /// This method will allow you to call back into the same object from Godot (re-entrancy).
+    /// You have to keep the `ScriptBaseRef` guard bound for the entire duration the engine might re-enter a function of your
+    /// `ScriptInstance`. The guard temporarily absorbs the `&mut self` reference, which allows for an additional mutable reference to be
+    /// acquired.
     ///
     /// Holding a mutable guard prevents other code paths from obtaining _any_ reference to `self`, as such it is recommended to drop the
     /// guard as soon as you no longer need it.
@@ -466,7 +458,9 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     /// # use godot::classes::{ScriptLanguage, Script};
     /// # use godot::obj::script::{ScriptInstance, SiMut};
     /// # use godot::meta::{MethodInfo, PropertyInfo};
+    /// # use godot::meta::error::CallErrorType;
     /// # use godot::sys;
+    ///
     /// struct ExampleScriptInstance;
     ///
     /// impl ScriptInstance for ExampleScriptInstance {
@@ -476,7 +470,7 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     ///         mut this: SiMut<Self>,
     ///         method: StringName,
     ///         args: &[&Variant],
-    ///     ) -> Result<Variant, sys::GDExtensionCallErrorType> {
+    ///     ) -> Result<Variant, CallErrorType> {
     ///         // Check whether method is available on this script
     ///         if method == StringName::from("script_method") {
     ///             godot_print!("script_method called!");
@@ -509,10 +503,11 @@ impl<'a, T: ScriptInstance> SiMut<'a, T> {
     ///     # fn get_method_argument_count(&self, _: StringName) -> Option<u32> { todo!() }
     /// }
     /// ```
-    pub fn base_mut(&mut self) -> ScriptBaseMut<T> {
+    pub fn base_mut(&mut self) -> ScriptBaseMut<'_, T> {
         let guard = self.cell.make_inaccessible(self.mut_ref).unwrap();
+        let passive_gd = self.base_ref.to_script_passive();
 
-        ScriptBaseMut::new(self.base_ref.to_gd(), guard)
+        ScriptBaseMut::new(passive_gd, guard)
     }
 }
 
@@ -599,20 +594,23 @@ mod bounded_ptr_list {
     }
 }
 
+#[cfg(before_api = "4.3")]
+use self::bounded_ptr_list::BoundedPtrList;
+
 #[deny(unsafe_op_in_unsafe_fn)]
 mod script_instance_info {
     use std::any::type_name;
     use std::ffi::c_void;
 
-    use crate::builtin::{StringName, Variant};
-    use crate::private::handle_panic;
-    use crate::sys;
-
-    use super::{ScriptInstance, ScriptInstanceData, SiMut};
-    use crate::meta::{MethodInfo, PropertyInfo};
     use sys::conv::{bool_to_sys, SYS_FALSE, SYS_TRUE};
     #[cfg(since_api = "4.3")]
     use sys::conv::{ptr_list_from_sys, ptr_list_into_sys};
+
+    use super::{ScriptInstance, ScriptInstanceData, SiMut};
+    use crate::builtin::{StringName, Variant};
+    use crate::meta::{MethodInfo, PropertyInfo};
+    use crate::private::handle_panic;
+    use crate::sys;
 
     /// # Safety
     ///
@@ -823,7 +821,8 @@ mod script_instance_info {
     ) {
         // SAFETY: `p_method` is a valid [`StringName`] pointer.
         let method = unsafe { StringName::new_from_string_sys(p_method) };
-        // SAFETY: `p_args` is a valid array of length `p_argument_count`
+
+        // SAFETY: `p_args` is a valid array of length `p_argument_count`.
         let args = unsafe {
             Variant::borrow_ref_slice(
                 p_args,
@@ -851,7 +850,7 @@ mod script_instance_info {
                 sys::GDEXTENSION_CALL_OK
             }
 
-            Ok(Err(err)) => err,
+            Ok(Err(err)) => err.to_sys(),
 
             Err(_) => sys::GDEXTENSION_CALL_ERROR_INVALID_METHOD,
         };

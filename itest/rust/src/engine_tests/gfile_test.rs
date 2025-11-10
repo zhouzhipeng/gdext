@@ -7,10 +7,11 @@
 
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 
-use crate::framework::itest;
 use godot::builtin::GString;
 use godot::classes::file_access::ModeFlags;
 use godot::tools::GFile;
+
+use crate::framework::itest;
 
 const TEST_FULL_PATH: &str = "res://file_tests";
 
@@ -153,7 +154,7 @@ fn bufread_trait_works() {
 
     for i in 0..5 {
         file.read_line(&mut read_lines)
-            .unwrap_or_else(|_| panic!("couldn't read line {}", i));
+            .unwrap_or_else(|_| panic!("couldn't read line {i}"));
     }
 
     assert_eq!(lines, read_lines);

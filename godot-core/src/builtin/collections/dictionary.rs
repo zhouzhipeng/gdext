@@ -5,20 +5,25 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use godot_ffi as sys;
-
-use crate::builtin::{inner, Variant, VariantArray};
-use crate::meta::{FromGodot, ToGodot};
-use sys::types::OpaqueDictionary;
-use sys::{ffi_methods, interface_fn, GodotFfi};
-
+use std::cell::OnceCell;
 use std::marker::PhantomData;
 use std::{fmt, ptr};
 
+use godot_ffi as sys;
+use sys::types::OpaqueDictionary;
+use sys::{ffi_methods, interface_fn, GodotFfi};
+
+use crate::builtin::{inner, Variant, VariantArray};
+use crate::meta::{ElementType, ExtVariantType, FromGodot, ToGodot};
+
 /// Godot's `Dictionary` type.
 ///
+/// Ordered associative hash-table, mapping keys to values.
+///
 /// The keys and values of the dictionary are all `Variant`s, so they can be of different types.
-/// Variants are designed to be generally cheap to clone.
+/// Variants are designed to be generally cheap to clone. Typed dictionaries are planned in a future godot-rust version.
+///
+/// Check out the [book](https://godot-rust.github.io/book/godot-api/builtins.html#arrays-and-dictionaries) for a tutorial on dictionaries.
 ///
 /// # Dictionary example
 ///
@@ -34,7 +39,7 @@ use std::{fmt, ptr};
 /// dict.set(coord, "Tile77");
 ///
 /// // Or create the same dictionary in a single expression.
-/// let dict = dict! {
+/// let dict = vdict! {
 ///    "str": "Hello",
 ///    "num": 23,
 ///    coord: "Tile77",
@@ -76,11 +81,21 @@ use std::{fmt, ptr};
 /// [`Dictionary` (stable)](https://docs.godotengine.org/en/stable/classes/class_dictionary.html)
 pub struct Dictionary {
     opaque: OpaqueDictionary,
+
+    /// Lazily computed and cached element type information for the key type.
+    cached_key_type: OnceCell<ElementType>,
+
+    /// Lazily computed and cached element type information for the value type.
+    cached_value_type: OnceCell<ElementType>,
 }
 
 impl Dictionary {
     fn from_opaque(opaque: OpaqueDictionary) -> Self {
-        Self { opaque }
+        Self {
+            opaque,
+            cached_key_type: OnceCell::new(),
+            cached_value_type: OnceCell::new(),
+        }
     }
 
     /// Constructs an empty `Dictionary`.
@@ -137,6 +152,40 @@ impl Dictionary {
         self.as_inner().get(&key.to_variant(), &Variant::nil())
     }
 
+    /// Gets a value and ensures the key is set, inserting default if key is absent.
+    ///
+    /// If the `key` exists in the dictionary, this behaves like [`get()`][Self::get], and the existing value is returned.
+    /// Otherwise, the `default` value is inserted and returned.
+    ///
+    /// # Compatibility
+    /// This function is natively available from Godot 4.3 onwards, we provide a polyfill for older versions.
+    ///
+    /// _Godot equivalent: `get_or_add`_
+    #[doc(alias = "get_or_add")]
+    pub fn get_or_insert<K: ToGodot, V: ToGodot>(&mut self, key: K, default: V) -> Variant {
+        self.balanced_ensure_mutable();
+
+        let key_variant = key.to_variant();
+        let default_variant = default.to_variant();
+
+        // Godot 4.3+: delegate to native get_or_add().
+        #[cfg(since_api = "4.3")]
+        {
+            self.as_inner().get_or_add(&key_variant, &default_variant)
+        }
+
+        // Polyfill for Godot versions before 4.3.
+        #[cfg(before_api = "4.3")]
+        {
+            if let Some(existing_value) = self.get(key_variant.clone()) {
+                existing_value
+            } else {
+                self.set(key_variant, default_variant.clone());
+                default_variant
+            }
+        }
+    }
+
     /// Returns `true` if the dictionary contains the given key.
     ///
     /// _Godot equivalent: `has`_
@@ -188,6 +237,8 @@ impl Dictionary {
 
     /// Removes all key-value pairs from the dictionary.
     pub fn clear(&mut self) {
+        self.balanced_ensure_mutable();
+
         self.as_inner().clear()
     }
 
@@ -197,6 +248,8 @@ impl Dictionary {
     ///
     /// _Godot equivalent: `dict[key] = value`_
     pub fn set<K: ToGodot, V: ToGodot>(&mut self, key: K, value: V) {
+        self.balanced_ensure_mutable();
+
         let key = key.to_variant();
 
         // SAFETY: `self.get_ptr_mut(key)` always returns a valid pointer to a value in the dictionary; either pre-existing or newly inserted.
@@ -210,6 +263,8 @@ impl Dictionary {
     /// If you don't need the previous value, use [`set()`][Self::set] instead.
     #[must_use]
     pub fn insert<K: ToGodot, V: ToGodot>(&mut self, key: K, value: V) -> Option<Variant> {
+        self.balanced_ensure_mutable();
+
         let key = key.to_variant();
         let old_value = self.get(key.clone());
         self.set(key, value);
@@ -222,13 +277,19 @@ impl Dictionary {
     /// _Godot equivalent: `erase`_
     #[doc(alias = "erase")]
     pub fn remove<K: ToGodot>(&mut self, key: K) -> Option<Variant> {
+        self.balanced_ensure_mutable();
+
         let key = key.to_variant();
         let old_value = self.get(key.clone());
         self.as_inner().erase(&key);
         old_value
     }
 
-    /// Returns a 32-bit integer hash value representing the dictionary and its contents.
+    crate::declare_hash_u32_method! {
+        /// Returns a 32-bit integer hash value representing the dictionary and its contents.
+    }
+
+    #[deprecated = "renamed to `hash_u32`"]
     #[must_use]
     pub fn hash(&self) -> u32 {
         self.as_inner().hash().try_into().unwrap()
@@ -257,6 +318,8 @@ impl Dictionary {
     /// _Godot equivalent: `merge`_
     #[doc(alias = "merge")]
     pub fn extend_dictionary(&mut self, other: &Self, overwrite: bool) {
+        self.balanced_ensure_mutable();
+
         self.as_inner().merge(other, overwrite)
     }
 
@@ -270,7 +333,7 @@ impl Dictionary {
     ///
     /// _Godot equivalent: `dict.duplicate(true)`_
     pub fn duplicate_deep(&self) -> Self {
-        self.as_inner().duplicate(true)
+        self.as_inner().duplicate(true).with_cache(self)
     }
 
     /// Shallow copy, copying elements but sharing nested collections.
@@ -283,7 +346,7 @@ impl Dictionary {
     ///
     /// _Godot equivalent: `dict.duplicate(false)`_
     pub fn duplicate_shallow(&self) -> Self {
-        self.as_inner().duplicate(false)
+        self.as_inner().duplicate(false).with_cache(self)
     }
 
     /// Returns an iterator over the key-value pairs of the `Dictionary`.
@@ -312,8 +375,90 @@ impl Dictionary {
         Keys::new(self)
     }
 
+    /// Turns the dictionary into a shallow-immutable dictionary.
+    ///
+    /// Makes the dictionary read-only and returns the original dictionary. Disables modification of the dictionary's contents.
+    /// Does not apply to nested content, e.g. elements of nested dictionaries.
+    ///
+    /// In GDScript, dictionaries are automatically read-only if declared with the `const` keyword.
+    ///
+    /// # Semantics and alternatives
+    /// You can use this in Rust, but the behavior of mutating methods is only validated in a best-effort manner (more than in GDScript though):
+    /// some methods like `set()` panic in Debug mode, when used on a read-only dictionary. There is no guarantee that any attempts to change
+    /// result in feedback; some may silently do nothing.
+    ///
+    /// In Rust, you can use shared references (`&Dictionary`) to prevent mutation. Note however that `Clone` can be used to create another
+    /// reference, through which mutation can still occur. For deep-immutable dictionaries, you'll need to keep your `Dictionary` encapsulated
+    /// or directly use Rust data structures.
+    ///
+    /// _Godot equivalent: `make_read_only`_
+    #[doc(alias = "make_read_only")]
+    pub fn into_read_only(self) -> Self {
+        self.as_inner().make_read_only();
+        self
+    }
+
+    /// Returns true if the dictionary is read-only.
+    ///
+    /// See [`into_read_only()`][Self::into_read_only].
+    /// In GDScript, dictionaries are automatically read-only if declared with the `const` keyword.
+    pub fn is_read_only(&self) -> bool {
+        self.as_inner().is_read_only()
+    }
+
+    /// Best-effort mutability check.
+    ///
+    /// # Panics (safeguards-balanced)
+    /// If the dictionary is marked as read-only.
+    fn balanced_ensure_mutable(&self) {
+        sys::balanced_assert!(
+            !self.is_read_only(),
+            "mutating operation on read-only dictionary"
+        );
+    }
+
+    /// Returns the runtime element type information for keys in this dictionary.
+    ///
+    /// Provides information about Godot typed dictionaries, even though godot-rust currently doesn't implement generics for those.
+    ///
+    /// The result is generally cached, so feel free to call this method repeatedly.
+    ///
+    /// # Panics (Debug)
+    /// In the astronomically rare case where another extension in Godot modifies a dictionary's key type (which godot-rust already cached as `Untyped`)
+    /// via C function `dictionary_set_typed`, thus leading to incorrect cache values. Such bad practice of not typing dictionaries immediately on
+    /// construction is not supported, and will not be checked in Release mode.
+    #[cfg(since_api = "4.4")]
+    pub fn key_element_type(&self) -> ElementType {
+        ElementType::get_or_compute_cached(
+            &self.cached_key_type,
+            || self.as_inner().get_typed_key_builtin(),
+            || self.as_inner().get_typed_key_class_name(),
+            || self.as_inner().get_typed_key_script(),
+        )
+    }
+
+    /// Returns the runtime element type information for values in this dictionary.
+    ///
+    /// Provides information about Godot typed dictionaries, even though godot-rust currently doesn't implement generics for those.
+    ///
+    /// The result is generally cached, so feel free to call this method repeatedly.
+    ///
+    /// # Panics (Debug)
+    /// In the astronomically rare case where another extension in Godot modifies a dictionary's value type (which godot-rust already cached as `Untyped`)
+    /// via C function `dictionary_set_typed`, thus leading to incorrect cache values. Such bad practice of not typing dictionaries immediately on
+    /// construction is not supported, and will not be checked in Release mode.
+    #[cfg(since_api = "4.4")]
+    pub fn value_element_type(&self) -> ElementType {
+        ElementType::get_or_compute_cached(
+            &self.cached_value_type,
+            || self.as_inner().get_typed_value_builtin(),
+            || self.as_inner().get_typed_value_class_name(),
+            || self.as_inner().get_typed_value_script(),
+        )
+    }
+
     #[doc(hidden)]
-    pub fn as_inner(&self) -> inner::InnerDictionary {
+    pub fn as_inner(&self) -> inner::InnerDictionary<'_> {
         inner::InnerDictionary::from_outer(self)
     }
 
@@ -326,6 +471,17 @@ impl Dictionary {
         // Never a null pointer, since entry either existed already or was inserted above.
         // SAFETY: accessing an unknown key _mutably_ creates that entry in the dictionary, with value `NIL`.
         unsafe { interface_fn!(dictionary_operator_index)(self.sys_mut(), key.var_sys()) }
+    }
+
+    /// Execute a function that creates a new Dictionary, transferring cached element types if available.
+    ///
+    /// This is a convenience helper for methods that create new Dictionary instances and want to preserve
+    /// cached type information to avoid redundant FFI calls.
+    fn with_cache(self, source: &Self) -> Self {
+        // Transfer both key and value type caches independently
+        ElementType::transfer_cache(&source.cached_key_type, &self.cached_key_type);
+        ElementType::transfer_cache(&source.cached_value_type, &self.cached_value_type);
+        self
     }
 }
 
@@ -342,14 +498,12 @@ impl Dictionary {
 //   incremented as that is the callee's responsibility. Which we do by calling
 //   `std::mem::forget(dictionary.clone())`.
 unsafe impl GodotFfi for Dictionary {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::DICTIONARY
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::DICTIONARY);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
 }
 
-crate::meta::impl_godot_as_self!(Dictionary);
+crate::meta::impl_godot_as_self!(Dictionary: ByRef);
 
 impl_builtin_traits! {
     for Dictionary {
@@ -389,13 +543,14 @@ impl fmt::Display for Dictionary {
 impl Clone for Dictionary {
     fn clone(&self) -> Self {
         // SAFETY: `self` is a valid dictionary, since we have a reference that keeps it alive.
-        unsafe {
+        let result = unsafe {
             Self::new_with_uninit(|self_ptr| {
                 let ctor = sys::builtin_fn!(dictionary_construct_copy);
                 let args = [self.sys()];
                 ctor(self_ptr, args.as_ptr());
             })
-        }
+        };
+        result.with_cache(self)
     }
 }
 
@@ -712,10 +867,10 @@ fn u8_to_bool(u: u8) -> bool {
 ///
 /// # Example
 /// ```no_run
-/// use godot::builtin::{dict, Variant};
+/// use godot::builtin::{vdict, Variant};
 ///
 /// let key = "my_key";
-/// let d = dict! {
+/// let d = vdict! {
 ///     "key1": 10,
 ///     "another": Variant::nil(),
 ///     key: true,
@@ -727,7 +882,7 @@ fn u8_to_bool(u: u8) -> bool {
 ///
 /// For arrays, similar macros [`array!`][macro@crate::builtin::array] and [`varray!`][macro@crate::builtin::varray] exist.
 #[macro_export]
-macro_rules! dict {
+macro_rules! vdict {
     ($($key:tt: $value:expr),* $(,)?) => {
         {
             let mut d = $crate::builtin::Dictionary::new();
@@ -739,5 +894,15 @@ macro_rules! dict {
             )*
             d
         }
+    };
+}
+
+#[macro_export]
+#[deprecated = "Migrate to `vdict!`. The name `dict!` will be used in the future for typed dictionaries."]
+macro_rules! dict {
+    ($($key:tt: $value:expr),* $(,)?) => {
+        $crate::vdict!(
+            $($key: $value),*
+        )
     };
 }

@@ -5,19 +5,42 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use godot_ffi as sys;
-
 use sys::GodotFfi;
 
 use crate::builtin::{GString, StringName};
 use crate::out;
 
-pub use sys::GdextBuild;
+mod reexport_pub {
+    #[cfg(not(wasm_nothreads))]
+    pub use super::sys::main_thread_id;
+    pub use super::sys::{is_main_thread, GdextBuild, InitStage};
+}
+pub use reexport_pub::*;
 
-#[cfg(not(wasm_nothreads))]
-pub use sys::{is_main_thread, main_thread_id};
+#[repr(C)]
+struct InitUserData {
+    library: sys::GDExtensionClassLibraryPtr,
+    #[cfg(since_api = "4.5")]
+    main_loop_callbacks: sys::GDExtensionMainLoopCallbacks,
+}
+
+#[cfg(since_api = "4.5")]
+unsafe extern "C" fn startup_func<E: ExtensionLibrary>() {
+    E::on_stage_init(InitStage::MainLoop);
+}
+
+#[cfg(since_api = "4.5")]
+unsafe extern "C" fn frame_func<E: ExtensionLibrary>() {
+    E::on_main_loop_frame();
+}
+
+#[cfg(since_api = "4.5")]
+unsafe extern "C" fn shutdown_func<E: ExtensionLibrary>() {
+    E::on_stage_deinit(InitStage::MainLoop);
+}
 
 #[doc(hidden)]
 #[deny(unsafe_op_in_unsafe_fn)]
@@ -31,11 +54,7 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
         // cause TLS-destructors to run then we have a setting already for how to deal with them. Otherwise, this could cause the default
         // behavior to kick in and disable hot reloading.
         #[cfg(target_os = "linux")]
-        match E::override_hot_reload() {
-            None => sys::linux_reload_workaround::default_set_hot_reload(),
-            Some(true) => sys::linux_reload_workaround::enable_hot_reload(),
-            Some(false) => sys::linux_reload_workaround::disable_hot_reload(),
-        }
+        sys::linux_reload_workaround::default_set_hot_reload();
 
         let tool_only_in_editor = match E::editor_run_behavior() {
             EditorRunBehavior::ToolClassesOnly => true,
@@ -63,10 +82,20 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
         // Currently no way to express failure; could be exposed to E if necessary.
         // No early exit, unclear if Godot still requires output parameters to be set.
         let success = true;
+        // Leak the userdata. It will be dropped in core level deinitialization.
+        let userdata = Box::into_raw(Box::new(InitUserData {
+            library,
+            #[cfg(since_api = "4.5")]
+            main_loop_callbacks: sys::GDExtensionMainLoopCallbacks {
+                startup_func: Some(startup_func::<E>),
+                frame_func: Some(frame_func::<E>),
+                shutdown_func: Some(shutdown_func::<E>),
+            },
+        }));
 
         let godot_init_params = sys::GDExtensionInitialization {
             minimum_initialization_level: E::min_level().to_sys(),
-            userdata: std::ptr::null_mut(),
+            userdata: userdata.cast::<std::ffi::c_void>(),
             initialize: Some(ffi_initialize_layer::<E>),
             deinitialize: Some(ffi_deinitialize_layer::<E>),
         };
@@ -91,55 +120,59 @@ pub unsafe fn __gdext_load_library<E: ExtensionLibrary>(
 static LEVEL_SERVERS_CORE_LOADED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn ffi_initialize_layer<E: ExtensionLibrary>(
-    _userdata: *mut std::ffi::c_void,
+    userdata: *mut std::ffi::c_void,
     init_level: sys::GDExtensionInitializationLevel,
 ) {
+    let userdata = userdata.cast::<InitUserData>().as_ref().unwrap();
     let level = InitLevel::from_sys(init_level);
-    let ctx = || format!("failed to initialize GDExtension level `{:?}`", level);
+    let ctx = || format!("failed to initialize GDExtension level `{level:?}`");
 
-    fn try_load<E: ExtensionLibrary>(level: InitLevel) {
+    fn try_load<E: ExtensionLibrary>(level: InitLevel, userdata: &InitUserData) {
         // Workaround for https://github.com/godot-rust/gdext/issues/629:
         // When using editor plugins, Godot may unload all levels but only reload from Scene upward.
         // Manually run initialization of lower levels.
 
         // TODO: Remove this workaround once after the upstream issue is resolved.
         if level == InitLevel::Scene {
-            if !LEVEL_SERVERS_CORE_LOADED.load(Relaxed) {
-                try_load::<E>(InitLevel::Core);
-                try_load::<E>(InitLevel::Servers);
+            if !LEVEL_SERVERS_CORE_LOADED.load(Ordering::Relaxed) {
+                try_load::<E>(InitLevel::Core, userdata);
+                try_load::<E>(InitLevel::Servers, userdata);
             }
         } else if level == InitLevel::Core {
             // When it's normal initialization, the `Servers` level is normally initialized.
-            LEVEL_SERVERS_CORE_LOADED.store(true, Relaxed);
+            LEVEL_SERVERS_CORE_LOADED.store(true, Ordering::Relaxed);
         }
 
         // SAFETY: Godot will call this from the main thread, after `__gdext_load_library` where the library is initialized,
         // and only once per level.
-        unsafe { gdext_on_level_init(level) };
-        E::on_level_init(level);
+        unsafe { gdext_on_level_init(level, userdata) };
+        E::on_stage_init(level.to_stage());
     }
 
     // Swallow panics. TODO consider crashing if gdext init fails.
     let _ = crate::private::handle_panic(ctx, || {
-        try_load::<E>(level);
+        try_load::<E>(level, userdata);
     });
 }
 
 unsafe extern "C" fn ffi_deinitialize_layer<E: ExtensionLibrary>(
-    _userdata: *mut std::ffi::c_void,
+    userdata: *mut std::ffi::c_void,
     init_level: sys::GDExtensionInitializationLevel,
 ) {
     let level = InitLevel::from_sys(init_level);
-    let ctx = || format!("failed to deinitialize GDExtension level `{:?}`", level);
+    let ctx = || format!("failed to deinitialize GDExtension level `{level:?}`");
 
     // Swallow panics.
     let _ = crate::private::handle_panic(ctx, || {
         if level == InitLevel::Core {
             // Once the CORE api is unloaded, reset the flag to initial state.
-            LEVEL_SERVERS_CORE_LOADED.store(false, Relaxed);
+            LEVEL_SERVERS_CORE_LOADED.store(false, Ordering::Relaxed);
+
+            // Drop the userdata.
+            drop(Box::from_raw(userdata.cast::<InitUserData>()));
         }
 
-        E::on_level_deinit(level);
+        E::on_stage_deinit(level.to_stage());
         gdext_on_level_deinit(level);
     });
 }
@@ -152,7 +185,7 @@ unsafe extern "C" fn ffi_deinitialize_layer<E: ExtensionLibrary>(
 /// - The interface must have been initialized.
 /// - Must only be called once per level.
 #[deny(unsafe_op_in_unsafe_fn)]
-unsafe fn gdext_on_level_init(level: InitLevel) {
+unsafe fn gdext_on_level_init(level: InitLevel, userdata: &InitUserData) {
     // TODO: in theory, a user could start a thread in one of the early levels, and run concurrent code that messes with the global state
     // (e.g. class registration). This would break the assumption that the load_class_method_table() calls are exclusive.
     // We could maybe protect globals with a mutex until initialization is complete, and then move it to a directly-accessible, read-only static.
@@ -161,6 +194,19 @@ unsafe fn gdext_on_level_init(level: InitLevel) {
     unsafe { sys::load_class_method_table(level) };
 
     match level {
+        InitLevel::Core => {
+            #[cfg(since_api = "4.5")]
+            unsafe {
+                sys::interface_fn!(register_main_loop_callbacks)(
+                    userdata.library,
+                    &raw const userdata.main_loop_callbacks,
+                )
+            };
+        }
+        InitLevel::Servers => {
+            // SAFETY: called from the main thread, sys::initialized has already been called.
+            unsafe { sys::discover_main_thread() };
+        }
         InitLevel::Scene => {
             // SAFETY: On the main thread, api initialized, `Scene` was initialized above.
             unsafe { ensure_godot_features_compatible() };
@@ -172,7 +218,6 @@ unsafe fn gdext_on_level_init(level: InitLevel) {
                 crate::docs::register();
             }
         }
-        _ => (),
     }
 
     crate::registry::class::auto_register_classes(level);
@@ -186,8 +231,8 @@ fn gdext_on_level_deinit(level: InitLevel) {
         // If lowest level is unloaded, call global deinitialization.
         // No business logic by itself, but ensures consistency if re-initialization (hot-reload on Linux) occurs.
 
-        #[cfg(since_api = "4.2")]
         crate::task::cleanup();
+        crate::tools::cleanup();
 
         // Garbage-collect various statics.
         // SAFETY: this is the last time meta APIs are used.
@@ -244,13 +289,34 @@ fn gdext_on_level_deinit(level: InitLevel) {
 /// Note that this only changes the name. You cannot provide your own function -- use the [`on_level_init()`][ExtensionLibrary::on_level_init]
 /// hook for custom startup logic.
 ///
+/// # Availability of Godot APIs during init and deinit
+// Init order: see also special_cases.rs > classify_codegen_level().
+/// Godot loads functionality gradually during its startup routines, and unloads it during shutdown. As a result, Godot classes are only
+/// available above a certain level. Trying to access a class API when it's not available will panic (if not, please report it as a bug).
+///
+/// A few singletons (`Engine`, `Os`, `Time`, `ProjectSettings`) are available from the `Core` level onward and can be used inside
+/// this method. Most other singletons are **not available during init** at all, and will only become accessible once the first frame has
+/// run.
+///
+/// The exact time a class is available depends on the Godot initialization logic, which is quite complex and may change between versions.
+/// To get an up-to-date view, inspect the Godot source code of [main.cpp], particularly `Main::setup()`, `Main::setup2()` and
+/// `Main::cleanup()` methods. Make sure to look at the correct version of the file.
+///
+/// In case of doubt, do not rely on classes being available during init/deinit.
+///
+/// [main.cpp]: https://github.com/godotengine/godot/blob/master/main/main.cpp
+///
 /// # Safety
 /// The library cannot enforce any safety guarantees outside Rust code, which means that **you as a user** are
 /// responsible to uphold them: namely in GDScript code or other GDExtension bindings loaded by the engine.
 /// Violating this may cause undefined behavior, even when invoking _safe_ functions.
 ///
+/// If you use the `disengaged` [safeguard level], you accept that UB becomes possible even **in safe Rust APIs**, if you use them wrong
+/// (e.g. accessing a destroyed object).
+///
 /// [gdextension]: attr.gdextension.html
 /// [safety]: https://godot-rust.github.io/book/gdext/advanced/safety.html
+/// [safeguard level]: ../index.html#safeguard-levels
 // FIXME intra-doc link
 #[doc(alias = "entry_symbol", alias = "entry_point")]
 pub unsafe trait ExtensionLibrary {
@@ -266,33 +332,160 @@ pub unsafe trait ExtensionLibrary {
         InitLevel::Scene
     }
 
-    /// Custom logic when a certain init-level of Godot is loaded.
+    /// Custom logic when a certain initialization stage is loaded.
     ///
-    /// This will only be invoked for levels >= [`Self::min_level()`], in ascending order. Use `if` or `match` to hook to specific levels.
+    /// This will be invoked for stages >= [`Self::min_level()`], in ascending order. Use `if` or `match` to hook to specific stages.
+    ///
+    /// The stages are loaded in order: `Core` → `Servers` → `Scene` → `Editor` (if in editor) → `MainLoop` (4.5+).  \
+    /// The `MainLoop` stage represents the fully initialized state of Godot, after all initialization levels and classes have been loaded.
+    ///
+    /// See also [`on_main_loop_frame()`][Self::on_main_loop_frame] for per-frame processing.
+    ///
+    /// # Panics
+    /// If the overridden method panics, an error will be printed, but GDExtension loading is **not** aborted.
+    #[allow(unused_variables)]
+    #[expect(deprecated)] // Fall back to older API.
+    fn on_stage_init(stage: InitStage) {
+        stage
+            .try_to_level()
+            .inspect(|&level| Self::on_level_init(level));
+
+        #[cfg(since_api = "4.5")] // Compat layer.
+        if stage == InitStage::MainLoop {
+            Self::on_main_loop_startup();
+        }
+    }
+
+    /// Custom logic when a certain initialization stage is unloaded.
+    ///
+    /// This will be invoked for stages >= [`Self::min_level()`], in descending order. Use `if` or `match` to hook to specific stages.
+    ///
+    /// The stages are unloaded in reverse order: `MainLoop` (4.5+) → `Editor` (if in editor) → `Scene` → `Servers` → `Core`.  \
+    /// At the time `MainLoop` is deinitialized, all classes are still available.
+    ///
+    /// # Panics
+    /// If the overridden method panics, an error will be printed, but GDExtension unloading is **not** aborted.
+    #[allow(unused_variables)]
+    #[expect(deprecated)] // Fall back to older API.
+    fn on_stage_deinit(stage: InitStage) {
+        #[cfg(since_api = "4.5")] // Compat layer.
+        if stage == InitStage::MainLoop {
+            Self::on_main_loop_shutdown();
+        }
+
+        stage
+            .try_to_level()
+            .inspect(|&level| Self::on_level_deinit(level));
+    }
+
+    /// Old callback before [`on_stage_init()`][Self::on_stage_deinit] was added. Does not support `MainLoop` stage.
+    #[deprecated = "Use `on_stage_init()` instead, which also includes the MainLoop stage."]
     #[allow(unused_variables)]
     fn on_level_init(level: InitLevel) {
         // Nothing by default.
     }
 
-    /// Custom logic when a certain init-level of Godot is unloaded.
-    ///
-    /// This will only be invoked for levels >= [`Self::min_level()`], in descending order. Use `if` or `match` to hook to specific levels.
+    /// Old callback before [`on_stage_deinit()`][Self::on_stage_deinit] was added. Does not support `MainLoop` stage.
+    #[deprecated = "Use `on_stage_deinit()` instead, which also includes the MainLoop stage."]
     #[allow(unused_variables)]
     fn on_level_deinit(level: InitLevel) {
         // Nothing by default.
     }
 
-    /// Whether to enable hot reloading of this library. Return `None` to use the default behavior.
+    #[cfg(since_api = "4.5")]
+    #[deprecated = "Use `on_stage_init(InitStage::MainLoop)` instead."]
+    #[doc(hidden)] // Added by mistake -- works but don't advertise.
+    fn on_main_loop_startup() {
+        // Nothing by default.
+    }
+
+    #[cfg(since_api = "4.5")]
+    #[deprecated = "Use `on_stage_deinit(InitStage::MainLoop)` instead."]
+    #[doc(hidden)] // Added by mistake -- works but don't advertise.
+    fn on_main_loop_shutdown() {
+        // Nothing by default.
+    }
+
+    /// Callback invoked for every process frame.
     ///
-    /// Enabling this will ensure that the library can be hot reloaded. If this is disabled then hot reloading may still work, but there is no
-    /// guarantee. Enabling this may also lead to memory leaks, so it should not be enabled for builds that are intended to be final builds.
+    /// This is called during the main loop, after Godot is fully initialized. It runs after all
+    /// [`process()`][crate::classes::INode::process] methods on Node, and before the Godot-internal `ScriptServer::frame()`.
+    /// This is intended to be the equivalent of [`IScriptLanguageExtension::frame()`][`crate::classes::IScriptLanguageExtension::frame()`]
+    /// for GDExtension language bindings that don't use the script API.
     ///
-    /// By default, this is enabled for debug builds and disabled for release builds.
+    /// # Example
+    /// To hook into startup/shutdown of the main loop, use [`on_stage_init()`][Self::on_stage_init] and
+    /// [`on_stage_deinit()`][Self::on_stage_deinit] and watch for [`InitStage::MainLoop`].
     ///
-    /// Note that this is only checked *once* upon initializing the library. Changing this from `true` to `false` will be picked up as the
-    /// library is then fully reloaded upon hot-reloading, however changing it from `false` to `true` is almost certainly not going to work
-    /// unless hot-reloading is already working regardless of this setting.
-    fn override_hot_reload() -> Option<bool> {
+    /// ```no_run
+    /// # use godot::init::*;
+    /// # struct MyExtension;
+    /// #[gdextension]
+    /// unsafe impl ExtensionLibrary for MyExtension {
+    ///     fn on_stage_init(stage: InitStage) {
+    ///         if stage == InitStage::MainLoop {
+    ///             // Startup code after fully initialized.
+    ///         }
+    ///     }
+    ///
+    ///     fn on_main_loop_frame() {
+    ///         // Per-frame logic.
+    ///     }
+    ///
+    ///     fn on_stage_deinit(stage: InitStage) {
+    ///         if stage == InitStage::MainLoop {
+    ///             // Cleanup code before shutdown.
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    /// If the overridden method panics, an error will be printed, but execution continues.
+    #[cfg(since_api = "4.5")]
+    fn on_main_loop_frame() {
+        // Nothing by default.
+    }
+
+    /// Whether to override the Wasm binary filename used by your GDExtension which the library should expect at runtime. Return `None`
+    /// to use the default where gdext expects either `{YourCrate}.wasm` (default binary name emitted by Rust) or
+    /// `{YourCrate}.threads.wasm` (for builds producing separate single-threaded and multi-threaded binaries).
+    ///
+    /// Upon exporting a game to the web, the library has to know at runtime the exact name of the `.wasm` binary file being used to load
+    /// each GDExtension. By default, Rust exports the binary as `cratename.wasm`, so that is the name checked by godot-rust by default.
+    ///
+    /// However, if you need to rename that binary, you can make the library aware of the new binary name by returning
+    /// `Some("newname.wasm")` (don't forget to **include the `.wasm` extension**).
+    ///
+    /// For example, to have two simultaneous versions, one supporting multi-threading and the other not, you could add a suffix to the
+    /// filename of the Wasm binary of the multi-threaded version in your build process. If you choose the suffix `.threads.wasm`,
+    /// you're in luck as godot-rust already accepts this suffix by default, but let's say you want to use a different suffix, such as
+    /// `-with-threads.wasm`. For this, you can have a `"nothreads"` feature which, when absent, should produce a suffixed binary,
+    /// which can be informed to gdext as follows:
+    ///
+    /// ```no_run
+    /// # use godot::init::*;
+    /// struct MyExtension;
+    ///
+    /// #[gdextension]
+    /// unsafe impl ExtensionLibrary for MyExtension {
+    ///     fn override_wasm_binary() -> Option<&'static str> {
+    ///         // Binary name unchanged ("mycrate.wasm") without thread support.
+    ///         #[cfg(feature = "nothreads")]
+    ///         return None;
+    ///
+    ///         // Tell godot-rust we add a custom suffix to the binary with thread support.
+    ///         // Please note that this is not needed if "mycrate.threads.wasm" is used.
+    ///         // (You could return `None` as well in that particular case.)
+    ///         #[cfg(not(feature = "nothreads"))]
+    ///         Some("mycrate-with-threads.wasm")
+    ///     }
+    /// }
+    /// ```
+    /// Note that simply overriding this method won't change the name of the Wasm binary produced by Rust automatically: you'll still
+    /// have to rename it by yourself in your build process, as well as specify the updated binary name in your `.gdextension` file.
+    /// This is just to ensure gdext is aware of the new name given to the binary, avoiding runtime errors.
+    fn override_wasm_binary() -> Option<&'static str> {
         None
     }
 }
@@ -325,15 +518,7 @@ pub enum EditorRunBehavior {
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
-/// Stage of the Godot initialization process.
-///
-/// Godot's initialization and deinitialization processes are split into multiple stages, like a stack. At each level,
-/// a different amount of engine functionality is available. Deinitialization happens in reverse order.
-///
-/// See also:
-/// - [`ExtensionLibrary::on_level_init()`]
-/// - [`ExtensionLibrary::on_level_deinit()`]
-pub type InitLevel = sys::InitLevel;
+pub use sys::InitLevel;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -348,6 +533,16 @@ unsafe fn ensure_godot_features_compatible() {
     // later, and godot-core would only depend on godot-sys. This makes future migrations easier. We still have access to builtins though.
 
     out!("Check Godot precision setting...");
+
+    #[cfg(feature = "debug-log")] // Display safeguards level in debug log.
+    let safeguards_level = if cfg!(safeguards_strict) {
+        "strict"
+    } else if cfg!(safeguards_balanced) {
+        "balanced"
+    } else {
+        "disengaged"
+    };
+    out!("Safeguards: {safeguards_level}");
 
     let os_class = StringName::from("OS");
     let single = GString::from("single");

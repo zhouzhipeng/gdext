@@ -8,11 +8,11 @@
 use std::fmt;
 
 use godot_ffi as sys;
-use godot_ffi::{ffi_methods, GdextBuild, GodotFfi};
-
-use crate::builtin::inner;
+use godot_ffi::{ffi_methods, ExtVariantType, GdextBuild, GodotFfi};
 
 use super::{GString, StringName};
+use crate::builtin::inner;
+use crate::meta::signed_range::SignedRange;
 
 /// A pre-parsed scene tree path.
 ///
@@ -54,13 +54,14 @@ impl NodePath {
     /// godot_print!("{}", path.get_name(2)); // "Sprite"
     /// ```
     ///
-    /// # Panics
-    /// In Debug mode, if `index` is out of bounds. In Release, a Godot error is generated and the result is unspecified (but safe).
+    /// # Panics (safeguards-balanced)
+    /// If `index` is out of bounds. In safeguards-disengaged level, a Godot error is generated and the result is unspecified (but safe).
     pub fn get_name(&self, index: usize) -> StringName {
         let inner = self.as_inner();
         let index = index as i64;
 
-        debug_assert!(
+        // Not safety-critical, Godot will do another check. But better error message.
+        sys::balanced_assert!(
             index < inner.get_name_count(),
             "NodePath '{self}': name at index {index} is out of bounds"
         );
@@ -80,13 +81,13 @@ impl NodePath {
     /// godot_print!("{}", path.get_subname(1)); // "resource_name"
     /// ```
     ///
-    /// # Panics
-    /// In Debug mode, if `index` is out of bounds. In Release, a Godot error is generated and the result is unspecified (but safe).
+    /// # Panics (safeguards-balanced)
+    /// If `index` is out of bounds. In safeguards-disengaged level, a Godot error is generated and the result is unspecified (but safe).
     pub fn get_subname(&self, index: usize) -> StringName {
         let inner = self.as_inner();
         let index = index as i64;
 
-        debug_assert!(
+        sys::balanced_assert!(
             index < inner.get_subname_count(),
             "NodePath '{self}': subname at index {index} is out of bounds"
         );
@@ -117,7 +118,11 @@ impl NodePath {
         self.get_name_count() + self.get_subname_count()
     }
 
-    /// Returns a 32-bit integer hash value representing the string.
+    crate::declare_hash_u32_method! {
+        /// Returns a 32-bit integer hash value representing the node path.
+    }
+
+    #[deprecated = "renamed to `hash_u32`"]
     pub fn hash(&self) -> u32 {
         self.as_inner()
             .hash()
@@ -128,29 +133,46 @@ impl NodePath {
     /// Returns the range `begin..exclusive_end` as a new `NodePath`.
     ///
     /// The absolute value of `begin` and `exclusive_end` will be clamped to [`get_total_count()`][Self::get_total_count].
-    /// So, to express "until the end", you can simply pass a large value for `exclusive_end`, such as `i32::MAX`.
     ///
-    /// If either `begin` or `exclusive_end` are negative, they will be relative to the end of the `NodePath`.  \
-    /// For example, `path.subpath(0, -2)` is a shorthand for `path.subpath(0, path.get_total_count() - 2)`.
+    /// # Usage
+    /// For negative indices, use [`wrapped()`](crate::meta::wrapped).
+    ///
+    /// ```no_run
+    /// # use godot::builtin::NodePath;
+    /// # use godot::meta::wrapped;
+    /// let path = NodePath::from("path/to/Node:with:props");
+    ///
+    /// // If upper bound is not defined, `exclusive_end` will span to the end of the `NodePath`.
+    /// let sub = path.subpath(2..);
+    /// assert_eq!(sub, ":props".into());
+    ///
+    /// // If either `begin` or `exclusive_end` are negative, they will be relative to the end of the `NodePath`.
+    /// let total_count = path.get_total_count();
+    /// let wrapped_sub = path.subpath(wrapped(0..-2));
+    /// let normal_sub = path.subpath(0..total_count - 2);
+    /// // Both are equal to "path/to/Node".
+    /// assert_eq!(wrapped_sub, normal_sub);
+    /// ```
     ///
     /// _Godot equivalent: `slice`_
     ///
     /// # Compatibility
-    /// The `slice()` behavior for Godot <= 4.3 is unintuitive, see [#100954](https://github.com/godotengine/godot/pull/100954). godot-rust
+    /// The `slice()` behavior for Godot <= 4.3 is unintuitive, see [#100954](https://github.com/godotengine/godot/pull/100954). Godot-rust
     /// automatically changes this to the fixed version for Godot 4.4+, even when used in older versions. So, the behavior is always the same.
     // i32 used because it can be negative and many Godot APIs use this, see https://github.com/godot-rust/gdext/pull/982/files#r1893732978.
     #[cfg(since_api = "4.3")]
     #[doc(alias = "slice")]
-    pub fn subpath(&self, begin: i32, exclusive_end: i32) -> NodePath {
+    pub fn subpath(&self, range: impl SignedRange) -> NodePath {
+        let (from, exclusive_end) = range.signed();
         // Polyfill for bug https://github.com/godotengine/godot/pull/100954, fixed in 4.4.
         let begin = if GdextBuild::since_api("4.4") {
-            begin
+            from
         } else {
-            let name_count = self.get_name_count() as i32;
-            let subname_count = self.get_subname_count() as i32;
+            let name_count = self.get_name_count() as i64;
+            let subname_count = self.get_subname_count() as i64;
             let total_count = name_count + subname_count;
 
-            let mut begin = begin.clamp(-total_count, total_count);
+            let mut begin = from.clamp(-total_count, total_count);
             if begin < 0 {
                 begin += total_count;
             }
@@ -160,7 +182,8 @@ impl NodePath {
             begin
         };
 
-        self.as_inner().slice(begin as i64, exclusive_end as i64)
+        self.as_inner()
+            .slice(begin, exclusive_end.unwrap_or(i32::MAX as i64))
     }
 
     crate::meta::declare_arg_method! {
@@ -180,7 +203,7 @@ impl NodePath {
     }
 
     #[doc(hidden)]
-    pub fn as_inner(&self) -> inner::InnerNodePath {
+    pub fn as_inner(&self) -> inner::InnerNodePath<'_> {
         inner::InnerNodePath::from_outer(self)
     }
 }
@@ -195,14 +218,12 @@ impl NodePath {
 //   incremented as that is the callee's responsibility. Which we do by calling
 //   `std::mem::forget(node_path.clone())`.
 unsafe impl GodotFfi for NodePath {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::NODE_PATH
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::NODE_PATH);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque; .. }
 }
 
-crate::meta::impl_godot_as_self!(NodePath);
+crate::meta::impl_godot_as_self!(NodePath: ByRef);
 
 impl_builtin_traits! {
     for NodePath {
@@ -236,20 +257,16 @@ impl fmt::Debug for NodePath {
 impl_rust_string_conv!(NodePath);
 
 impl From<&str> for NodePath {
+    // NodePath doesn't offer direct construction from bytes; go via GString.
     fn from(s: &str) -> Self {
-        GString::from(s).into()
-    }
-}
-
-impl From<String> for NodePath {
-    fn from(s: String) -> Self {
-        GString::from(s).into()
+        Self::from(&GString::from(s))
     }
 }
 
 impl From<&String> for NodePath {
     fn from(s: &String) -> Self {
-        GString::from(s).into()
+        // NodePath doesn't offer direct construction from bytes; go via GString.
+        Self::from(&GString::from(s))
     }
 }
 
@@ -265,36 +282,20 @@ impl From<&GString> for NodePath {
     }
 }
 
-impl From<GString> for NodePath {
-    /// Converts this `GString` to a `NodePath`.
-    ///
-    /// This is identical to `NodePath::from(&string)`, and as such there is no performance benefit.
-    fn from(string: GString) -> Self {
-        Self::from(&string)
-    }
-}
-
 impl From<&StringName> for NodePath {
-    fn from(string_name: &StringName) -> Self {
-        Self::from(GString::from(string_name))
-    }
-}
-
-impl From<StringName> for NodePath {
-    /// Converts this `StringName` to a `NodePath`.
-    ///
-    /// This is identical to `NodePath::from(&string_name)`, and as such there is no performance benefit.
-    fn from(string_name: StringName) -> Self {
-        Self::from(GString::from(string_name))
+    fn from(s: &StringName) -> Self {
+        Self::from(&GString::from(s))
     }
 }
 
 #[cfg(feature = "serde")]
 mod serialize {
-    use super::*;
+    use std::fmt::Formatter;
+
     use serde::de::{Error, Visitor};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::fmt::Formatter;
+
+    use super::*;
 
     // For "Available on crate feature `serde`" in docs. Cannot be inherited from module. Also does not support #[derive] (e.g. in Vector2).
     #[cfg_attr(published_docs, doc(cfg(feature = "serde")))]

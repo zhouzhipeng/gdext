@@ -23,22 +23,19 @@ impl Sealed for Vector4 {}
 impl Sealed for Vector2i {}
 impl Sealed for Vector3i {}
 impl Sealed for Vector4i {}
+impl Sealed for Vector2Axis {}
+impl Sealed for Vector3Axis {}
+impl Sealed for Vector4Axis {}
 impl Sealed for Quaternion {}
 impl Sealed for Color {}
 impl Sealed for GString {}
 impl Sealed for StringName {}
 impl Sealed for NodePath {}
-impl Sealed for PackedByteArray {}
-impl Sealed for PackedInt32Array {}
-impl Sealed for PackedInt64Array {}
-impl Sealed for PackedFloat32Array {}
-impl Sealed for PackedFloat64Array {}
-impl Sealed for PackedStringArray {}
-impl Sealed for PackedVector2Array {}
-impl Sealed for PackedVector3Array {}
-#[cfg(since_api = "4.3")]
-impl Sealed for PackedVector4Array {}
-impl Sealed for PackedColorArray {}
+// Generic implementation for all PackedArray<T> types.
+use crate::builtin::PackedArray;
+
+// Implement Sealed for the generic PackedArray<T> type.
+impl<T: meta::PackedArrayElement> Sealed for PackedArray<T> {}
 impl Sealed for Plane {}
 impl Sealed for Projection {}
 impl Sealed for Rid {}
@@ -65,10 +62,19 @@ impl<T: ArrayElement> Sealed for Array<T> {}
 impl<T: GodotClass> Sealed for Gd<T> {}
 impl<T: GodotClass> Sealed for RawGd<T> {}
 impl<T: GodotClass, D: ?Sized> Sealed for DynGd<T, D> {}
-impl<T: GodotClass> Sealed for meta::ObjectArg<T> {}
+impl<T: GodotClass, D: ?Sized + 'static> Sealed for Option<DynGd<T, D>> {}
 impl<T> Sealed for Option<T>
 where
     T: GodotType,
     T::Ffi: GodotNullableFfi,
 {
 }
+impl<T1> Sealed for (T1,) {}
+impl<T1, T2> Sealed for (T1, T2) {}
+impl<T1, T2, T3> Sealed for (T1, T2, T3) {}
+impl<T1, T2, T3, T4> Sealed for (T1, T2, T3, T4) {}
+impl<T1, T2, T3, T4, T5> Sealed for (T1, T2, T3, T4, T5) {}
+impl<T1, T2, T3, T4, T5, T6> Sealed for (T1, T2, T3, T4, T5, T6) {}
+impl<T1, T2, T3, T4, T5, T6, T7> Sealed for (T1, T2, T3, T4, T5, T6, T7) {}
+impl<T1, T2, T3, T4, T5, T6, T7, T8> Sealed for (T1, T2, T3, T4, T5, T6, T7, T8) {}
+impl<T1, T2, T3, T4, T5, T6, T7, T8, T9> Sealed for (T1, T2, T3, T4, T5, T6, T7, T8, T9) {}

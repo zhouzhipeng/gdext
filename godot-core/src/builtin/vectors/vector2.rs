@@ -5,15 +5,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use core::cmp::Ordering;
+use std::cmp::Ordering;
+use std::fmt;
+
 use godot_ffi as sys;
-use sys::{ffi_methods, GodotFfi};
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
 
 use crate::builtin::math::{FloatExt, GlamConv, GlamType};
 use crate::builtin::vectors::Vector2Axis;
 use crate::builtin::{inner, real, RAffine2, RVec2, Vector2i};
-
-use std::fmt;
 
 /// Vector used for 2D math using floating point coordinates.
 ///
@@ -71,12 +71,6 @@ impl_vector_fns!(Vector2, RVec2, real, (x, y));
 
 /// # Specialized `Vector2` functions
 impl Vector2 {
-    #[deprecated = "Moved to `Vector2i::cast_float()`"]
-    #[inline]
-    pub const fn from_vector2i(v: Vector2i) -> Self {
-        v.cast_float()
-    }
-
     /// Creates a unit Vector2 rotated to the given `angle` in radians. This is equivalent to doing `Vector2::new(angle.cos(), angle.sin())`
     /// or `Vector2::RIGHT.rotated(angle)`.
     ///
@@ -166,7 +160,7 @@ impl Vector2 {
 
     #[doc(hidden)]
     #[inline]
-    pub fn as_inner(&self) -> inner::InnerVector2 {
+    pub fn as_inner(&self) -> inner::InnerVector2<'_> {
         inner::InnerVector2::from_outer(self)
     }
 }
@@ -187,14 +181,12 @@ impl fmt::Display for Vector2 {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector2 {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::VECTOR2
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::VECTOR2);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(Vector2);
+crate::meta::impl_godot_as_self!(Vector2: ByValue);
 
 impl GlamConv for Vector2 {
     type Glam = RVec2;
@@ -214,9 +206,8 @@ impl GlamType for RVec2 {
 
 #[cfg(test)]
 mod test {
-    use crate::assert_eq_approx;
-
     use super::*;
+    use crate::assert_eq_approx;
 
     #[test]
     fn coord_min_max() {

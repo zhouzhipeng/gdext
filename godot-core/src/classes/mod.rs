@@ -18,9 +18,13 @@
 
 mod class_runtime;
 mod manual_extensions;
+mod match_class;
+mod type_safe_replacements;
 
 // Re-exports all generated classes, interface traits and sidecar modules.
 pub use crate::gen::classes::*;
+// Macro re-export.
+pub use crate::match_class;
 
 /// Support for Godot _native structures_.
 ///

@@ -47,11 +47,12 @@
 //!
 // Note that depending on if you want to exclude `Object`, you should use `DynMemory` instead of `Memory`.
 
+use private::Sealed;
+
 use crate::obj::cap::GodotDefault;
 use crate::obj::{Bounds, Gd, GodotClass, RawGd};
 use crate::storage::{InstanceCache, Storage};
 use crate::{out, sys};
-use private::Sealed;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Sealed trait
@@ -114,15 +115,15 @@ pub(super) mod private {
     /// ```no_run
     /// use godot::prelude::*;
     /// use godot::obj::bounds::implement_godot_bounds;
-    /// use godot::meta::ClassName;
+    /// use godot::meta::ClassId;
     ///
     /// struct MyClass {}
     ///
     /// impl GodotClass for MyClass {
     ///     type Base = Node;
     ///
-    ///     fn class_name() -> ClassName {
-    ///         ClassName::new_cached::<MyClass>(|| "MyClass".to_string())
+    ///     fn class_id() -> ClassId {
+    ///         ClassId::new_cached::<MyClass>(|| "MyClass".to_string())
     ///     }
     /// }
     ///
@@ -152,7 +153,11 @@ pub use crate::implement_godot_bounds;
 // Memory bounds
 
 /// Specifies the memory strategy of the static type.
-pub trait Memory: Sealed {}
+pub trait Memory: Sealed {
+    /// True for everything inheriting `RefCounted`, false for `Object` and all other classes.
+    #[doc(hidden)]
+    const IS_REF_COUNTED: bool;
+}
 
 /// Specifies the memory strategy of the dynamic type.
 ///
@@ -205,10 +210,12 @@ pub trait DynMemory: Sealed {
 /// This is used for `RefCounted` classes and derived.
 pub struct MemRefCounted {}
 impl Sealed for MemRefCounted {}
-impl Memory for MemRefCounted {}
+impl Memory for MemRefCounted {
+    const IS_REF_COUNTED: bool = true;
+}
 impl DynMemory for MemRefCounted {
     fn maybe_init_ref<T: GodotClass>(obj: &mut RawGd<T>) {
-        out!("  MemRefc::init  <{}>", std::any::type_name::<T>());
+        out!("  MemRefc::init:  {obj:?}");
         if obj.is_null() {
             return;
         }
@@ -226,7 +233,7 @@ impl DynMemory for MemRefCounted {
     }
 
     fn maybe_inc_ref<T: GodotClass>(obj: &mut RawGd<T>) {
-        out!("  MemRefc::inc   <{}>", std::any::type_name::<T>());
+        out!("  MemRefc::inc:   {obj:?}");
         if obj.is_null() {
             return;
         }
@@ -237,7 +244,7 @@ impl DynMemory for MemRefCounted {
     }
 
     unsafe fn maybe_dec_ref<T: GodotClass>(obj: &mut RawGd<T>) -> bool {
-        out!("  MemRefc::dec   <{}>", std::any::type_name::<T>());
+        out!("  MemRefc::dec:   {obj:?}");
         if obj.is_null() {
             return false;
         }
@@ -278,7 +285,7 @@ impl MemDynamic {
 impl Sealed for MemDynamic {}
 impl DynMemory for MemDynamic {
     fn maybe_init_ref<T: GodotClass>(obj: &mut RawGd<T>) {
-        out!("  MemDyn::init  <{}>", std::any::type_name::<T>());
+        out!("  MemDyn::init:  {obj:?}");
         if Self::inherits_refcounted(obj) {
             // Will call `RefCounted::init_ref()` which checks for liveness.
             out!("    MemDyn -> MemRefc");
@@ -289,7 +296,7 @@ impl DynMemory for MemDynamic {
     }
 
     fn maybe_inc_ref<T: GodotClass>(obj: &mut RawGd<T>) {
-        out!("  MemDyn::inc   <{}>", std::any::type_name::<T>());
+        out!("  MemDyn::inc:   {obj:?}");
         if Self::inherits_refcounted(obj) {
             // Will call `RefCounted::reference()` which checks for liveness.
             MemRefCounted::maybe_inc_ref(obj)
@@ -297,7 +304,7 @@ impl DynMemory for MemDynamic {
     }
 
     unsafe fn maybe_dec_ref<T: GodotClass>(obj: &mut RawGd<T>) -> bool {
-        out!("  MemDyn::dec   <{}>", std::any::type_name::<T>());
+        out!("  MemDyn::dec:   {obj:?}");
         if obj
             .instance_id_unchecked()
             .is_some_and(|id| id.is_ref_counted())
@@ -327,7 +334,9 @@ impl DynMemory for MemDynamic {
 /// This is used for all `Object` derivates, which are not `RefCounted`. `Object` itself is also excluded.
 pub struct MemManual {}
 impl Sealed for MemManual {}
-impl Memory for MemManual {}
+impl Memory for MemManual {
+    const IS_REF_COUNTED: bool = false;
+}
 impl DynMemory for MemManual {
     fn maybe_init_ref<T: GodotClass>(_obj: &mut RawGd<T>) {}
     fn maybe_inc_ref<T: GodotClass>(_obj: &mut RawGd<T>) {}
@@ -389,11 +398,7 @@ impl Declarer for DeclEngine {
     where
         T: GodotDefault + Bounds<Declarer = Self>,
     {
-        unsafe {
-            let object_ptr =
-                sys::interface_fn!(classdb_construct_object)(T::class_name().string_sys());
-            Gd::from_obj_sys(object_ptr)
-        }
+        crate::classes::construct_engine_object()
     }
 }
 

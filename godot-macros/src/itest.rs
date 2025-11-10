@@ -8,7 +8,9 @@
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 
-use crate::util::{bail, extract_typename, ident, path_ends_with, KvParser};
+use crate::util::{
+    bail, extract_typename, ident, path_ends_with, retain_attributes_except, KvParser,
+};
 use crate::ParseResult;
 
 pub fn attribute_itest(input_item: venial::Item) -> ParseResult<TokenStream> {
@@ -62,10 +64,9 @@ pub fn attribute_itest(input_item: venial::Item) -> ParseResult<TokenStream> {
         quote! { __unused_context: &crate::framework::TestContext }
     };
 
+    let return_ty = func.return_ty.as_ref();
     if is_async
-        && func
-            .return_ty
-            .as_ref()
+        && return_ty
             .and_then(extract_typename)
             .is_none_or(|segment| segment.ident != "TaskHandle")
     {
@@ -76,7 +77,8 @@ pub fn attribute_itest(input_item: venial::Item) -> ParseResult<TokenStream> {
 
     let (return_tokens, test_case_ty, plugin_name);
     if is_async {
-        return_tokens = quote! { -> TaskHandle };
+        let [arrow, arrow_head] = func.tk_return_arrow.unwrap();
+        return_tokens = quote! { #arrow #arrow_head #return_ty }; // retain span.
         test_case_ty = quote! { crate::framework::AsyncRustTestCase };
         plugin_name = ident("__GODOT_ASYNC_ITEST");
     } else {
@@ -85,7 +87,11 @@ pub fn attribute_itest(input_item: venial::Item) -> ParseResult<TokenStream> {
         plugin_name = ident("__GODOT_ITEST");
     };
 
+    // Filter out #[itest] itself, but preserve other attributes like #[allow], #[expect], etc.
+    let other_attributes = retain_attributes_except(&func.attributes, "itest");
+
     Ok(quote! {
+        #(#other_attributes)*
         pub fn #test_name(#param) #return_tokens {
             #body
         }

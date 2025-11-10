@@ -5,13 +5,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::path::Path;
+
+use proc_macro2::{Ident, TokenStream};
+use quote::quote;
+
 use crate::generator::functions_common;
 use crate::generator::functions_common::{FnCode, FnReceiver};
 use crate::models::domain::{ExtensionApi, Function, UtilityFunction};
 use crate::{util, SubmitFn};
-use proc_macro2::{Ident, TokenStream};
-use quote::quote;
-use std::path::Path;
 
 pub(crate) fn generate_utilities_file(
     api: &ExtensionApi,
@@ -46,7 +48,7 @@ pub(crate) fn make_utility_function_definition(function: &UtilityFunction) -> To
     let ptrcall_invocation = quote! {
         let utility_fn = sys::utility_function_table().#function_ident;
 
-        <CallSig as PtrcallSignatureTuple>::out_utility_ptrcall(
+        Signature::<CallParams, CallRet>::out_utility_ptrcall(
             utility_fn,
             #function_name_str,
             args
@@ -56,7 +58,7 @@ pub(crate) fn make_utility_function_definition(function: &UtilityFunction) -> To
     let varcall_invocation = quote! {
         let utility_fn = sys::utility_function_table().#function_ident;
 
-        <CallSig as VarcallSignatureTuple>::out_utility_ptrcall_varargs(
+        Signature::<CallParams, CallRet>::out_utility_ptrcall_varargs(
             utility_fn,
             #function_name_str,
             args,

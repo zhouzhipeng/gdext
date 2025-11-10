@@ -8,13 +8,15 @@
 mod approx_eq;
 mod float;
 mod glam_helpers;
+mod xform;
 
-pub use crate::{assert_eq_approx, assert_ne_approx};
 pub use approx_eq::ApproxEq;
 pub use float::FloatExt;
-
 // Internal glam re-exports
 pub(crate) use glam_helpers::*;
+pub use xform::XformInv;
+
+pub use crate::{assert_eq_approx, assert_ne_approx};
 
 #[cfg(test)]
 mod test {

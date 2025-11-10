@@ -12,6 +12,7 @@ extends TestSuite
 
 #(
 func test_varcall_IDENT():
+	mark_test_pending()
 	var ffi = GenFfi.new()
 
 	var from_rust: Variant = ffi.return_IDENT()
@@ -24,6 +25,7 @@ func test_varcall_IDENT():
 	var mirrored: Variant = ffi.mirror_IDENT(from_gdscript)
 	assert_eq(mirrored, from_gdscript, "mirrored == from_gdscript")
 	_check_callconv("mirror_IDENT", "varcall")
+	mark_test_succeeded()
 #)
 
 # Godot currently does not support calling static methods via reflection, which is why we use an instance for the return_static_IDENT() call.
@@ -32,6 +34,7 @@ func test_varcall_IDENT():
 # so Godot cannot use ptrcalls anyway.
 #(
 func test_varcall_static_IDENT():
+	mark_test_pending()
 	var instance = GenFfi.new() # workaround
 	var from_rust: Variant = instance.return_static_IDENT()
 	_check_callconv("return_static_IDENT", "varcall")
@@ -43,10 +46,12 @@ func test_varcall_static_IDENT():
 	var mirrored: Variant = GenFfi.mirror_static_IDENT(from_gdscript)
 	assert_eq(mirrored, from_gdscript, "mirrored_static == from_gdscript")
 	_check_callconv("mirror_static_IDENT", "varcall")
+	mark_test_succeeded()
 #)
 
 #(
 func test_ptrcall_IDENT():
+	mark_test_pending()
 	var ffi := GenFfi.new()
 
 	var from_rust: TYPE = ffi.return_IDENT()
@@ -59,10 +64,27 @@ func test_ptrcall_IDENT():
 	var mirrored: TYPE = ffi.mirror_IDENT(from_gdscript)
 	assert_eq(mirrored, from_gdscript, "mirrored == from_gdscript")
 	_check_callconv("mirror_IDENT", "ptrcall")
+	mark_test_succeeded()
+#)
+
+# Functions that are invoked via ptrcall do not have an API to propagate the error back to the caller, but Godot pre-initializes their
+# return value to the default value of that type. This test verifies that in case of panic, the default value (per Godot) is returned.
+#(
+func test_ptrcall_panic_IDENT():
+	mark_test_pending()
+	var ffi := GenFfi.new()
+
+	var from_rust: TYPE = ffi.panic_IDENT()
+	_check_callconv("panic_IDENT", "ptrcall")
+
+	var expected_default: TYPE # initialize to default (null for objects)
+	assert_eq(from_rust, expected_default, "return value from panicked ptrcall fn == default value")
+	mark_test_succeeded()
 #)
 
 #(
 func test_ptrcall_static_IDENT():
+	mark_test_pending()
 	var from_rust: TYPE = GenFfi.return_static_IDENT()
 	_check_callconv("return_static_IDENT", "ptrcall")
 
@@ -73,6 +95,7 @@ func test_ptrcall_static_IDENT():
 	var mirrored: TYPE = GenFfi.mirror_static_IDENT(from_gdscript)
 	assert_eq(mirrored, from_gdscript, "mirrored_static == from_gdscript")
 	_check_callconv("mirror_static_IDENT", "ptrcall")
+	mark_test_succeeded()
 #)
 
 func _check_callconv(function: String, expected: String) -> void:

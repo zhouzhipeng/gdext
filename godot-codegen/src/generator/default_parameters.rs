@@ -5,16 +5,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use functions_common as fns;
+use proc_macro2::{Ident, TokenStream};
+use quote::{format_ident, quote};
+
 use crate::generator::functions_common;
 use crate::generator::functions_common::{
-    make_arg_expr, make_param_or_field_type, FnArgExpr, FnCode, FnKind, FnParamDecl, FnParamTokens,
+    make_arg_expr, make_param_or_field_type, FnArgExpr, FnCode, FnKind, FnParamDecl,
 };
 use crate::models::domain::{FnParam, FnQualifier, Function, RustTy, TyName};
 use crate::util::{ident, safe_ident};
 use crate::{conv, special_cases};
-use functions_common as fns;
-use proc_macro2::{Ident, TokenStream};
-use quote::{format_ident, quote};
 
 pub fn make_function_definition_with_defaults(
     sig: &dyn Function,
@@ -29,7 +30,7 @@ pub fn make_function_definition_with_defaults(
 
     let simple_fn_name = safe_ident(sig.name());
     let extended_fn_name = format_ident!("{}_ex", simple_fn_name);
-    let default_parameter_usage = format!("To set the default parameters, use [`Self::{}`] and its builder methods.  See [the book](https://godot-rust.github.io/book/godot-api/functions.html#default-parameters) for detailed usage instructions.", extended_fn_name);
+    let default_parameter_usage = format!("To set the default parameters, use [`Self::{extended_fn_name}`] and its builder methods.  See [the book](https://godot-rust.github.io/book/godot-api/functions.html#default-parameters) for detailed usage instructions.");
     let vis = functions_common::make_vis(sig.is_private());
 
     let (builder_doc, surround_class_prefix) = make_extender_doc(sig, &extended_fn_name);
@@ -58,15 +59,6 @@ pub fn make_function_definition_with_defaults(
         &default_fn_params,
     );
 
-    // ExBuilder::new() constructor signature.
-    let FnParamTokens {
-        func_general_lifetime: simple_fn_lifetime,
-        ..
-    } = fns::make_params_exprs(
-        required_fn_params.iter().cloned(),
-        FnKind::ExBuilderConstructor,
-    );
-
     let return_decl = &sig.return_value().decl;
 
     // If either the builder has a lifetime (non-static/global method), or one of its parameters is a reference,
@@ -79,7 +71,7 @@ pub fn make_function_definition_with_defaults(
         #[doc = #builder_doc]
         #[must_use]
         #cfg_attributes
-        pub struct #builder_ty<'a> {
+        #vis struct #builder_ty<'a> {
             _phantom: std::marker::PhantomData<&'a ()>,
             #( #builder_field_decls, )*
         }
@@ -118,7 +110,7 @@ pub fn make_function_definition_with_defaults(
         // Lifetime is set if any parameter is a reference.
         #[doc = #default_parameter_usage]
         #[inline]
-        #vis fn #simple_fn_name #simple_fn_lifetime (
+        #vis fn #simple_fn_name (
             #simple_receiver_param
             #( #class_method_required_params, )*
         ) #return_decl {
@@ -184,6 +176,7 @@ fn make_extender_doc(sig: &dyn Function, extended_fn_name: &Ident) -> (String, T
     let surround_class_prefix;
     let builder_doc;
 
+    #[allow(clippy::uninlined_format_args)]
     match sig.surrounding_class() {
         Some(TyName { rust_ty, .. }) => {
             surround_class_prefix = quote! { re_export::#rust_ty:: };

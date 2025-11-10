@@ -13,17 +13,18 @@
 //! API design behind the builtin types (and some wider parts of the library) is elaborated in the
 //! [extended documentation page](../__docs/index.html#builtin-api-design).
 
-// Re-export macros.
-pub use crate::{array, dict, real, reals, varray};
-
 // Re-export generated enums.
 pub use crate::gen::central::global_reexported_enums::{Corner, EulerOrder, Side, VariantOperator};
 // Not yet public.
 pub(crate) use crate::gen::central::VariantDispatch;
 pub use crate::sys::VariantType;
+// Re-export macros.
+#[allow(deprecated)] // dict
+pub use crate::{array, dict, real, reals, varray, vdict};
 
 #[doc(hidden)]
 pub mod __prelude_reexport {
+    #[rustfmt::skip] // Do not reorder.
     use super::*;
 
     pub use aabb::*;
@@ -46,8 +47,16 @@ pub mod __prelude_reexport {
     pub use variant::*;
     pub use vectors::*;
 
+    pub use super::math::XformInv;
     pub use super::{EulerOrder, Side, VariantOperator, VariantType};
-    pub use crate::{array, dict, real, reals, varray};
+    pub use crate::{array, real, reals, varray, vdict, vslice};
+
+    #[allow(deprecated)]
+    #[rustfmt::skip] // Do not reorder.
+    pub use crate::dict;
+
+    #[cfg(feature = "trace")] // Test only.
+    pub use crate::static_sname;
 }
 
 pub use __prelude_reexport::*;
@@ -56,6 +65,7 @@ pub use __prelude_reexport::*;
 pub mod math;
 
 /// Iterator types for arrays and dictionaries.
+// Might rename this to `collections` or so.
 pub mod iter {
     pub use super::collections::iterators::*;
 }
@@ -65,6 +75,10 @@ pub mod strings {
     pub use super::string::{
         ExGStringFind, ExGStringSplit, ExStringNameFind, ExStringNameSplit, TransientStringNameOrd,
     };
+}
+
+pub(crate) mod meta_reexport {
+    pub use super::collections::PackedArrayElement;
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -97,22 +111,30 @@ mod vectors;
 // Rename imports because we re-export a subset of types under same module names.
 #[path = "real.rs"]
 mod real_inner;
-mod custom;
 
 #[doc(hidden)]
 pub mod inner {
     pub use crate::gen::builtin_classes::*;
 }
 
+#[macro_export]
+macro_rules! declare_hash_u32_method {
+    ( $( $docs:tt )+ ) => {
+        $( $docs )+
+        pub fn hash_u32(&self) -> u32 {
+            self.as_inner().hash().try_into().expect("Godot hashes are uint32_t")
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Conversion functions
+
 pub(crate) fn to_i64(i: usize) -> i64 {
     i.try_into().unwrap()
 }
 
 pub(crate) fn to_usize(i: i64) -> usize {
-    i.try_into().unwrap()
-}
-
-pub(crate) fn to_isize(i: usize) -> isize {
     i.try_into().unwrap()
 }
 

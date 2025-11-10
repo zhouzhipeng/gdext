@@ -7,19 +7,16 @@
 
 use std::time::{Duration, Instant};
 
-use godot::builtin::{Array, Callable, GString, Variant, VariantArray};
+use godot::builtin::{vslice, Array, Callable, GString, Variant, VariantArray};
 use godot::classes::{Engine, Node, Os};
 use godot::global::godot_error;
-use godot::meta::ToGodot;
-use godot::obj::Gd;
+use godot::obj::{Gd, Singleton};
 use godot::register::{godot_api, GodotClass};
 
+use super::AsyncRustTestCase;
 use crate::framework::{
     bencher, passes_filter, BenchResult, RustBenchmark, RustTestCase, TestContext,
 };
-
-#[cfg(since_api = "4.2")]
-use super::AsyncRustTestCase;
 
 #[derive(Debug, Clone, Default)]
 struct TestStats {
@@ -34,8 +31,6 @@ struct TestStats {
 pub struct IntegrationTests {
     stats: TestStats,
     focus_run: bool,
-    #[cfg(before_api = "4.2")]
-    base: godot::obj::Base<godot::classes::RefCounted>,
 }
 
 #[godot_api]
@@ -97,28 +92,6 @@ impl IntegrationTests {
             None
         };
 
-        #[cfg(before_api = "4.2")]
-        {
-            use godot::obj::WithBaseField;
-
-            property_tests.free();
-
-            let result = Self::conclude_tests(
-                &self.stats,
-                rust_time,
-                gdscript_time.map(|(elapsed, extra)| elapsed + extra),
-                allow_focus,
-            );
-
-            // on_finished will call back into self, so we have to make self re-entrant. We also can't call on_finished in deferred mode,
-            // since it's not available under the 4.1 API.
-            let base = self.base_mut();
-            on_finished.callv(&godot::builtin::varray![result]);
-            // We should do something with base to satisfy the compiler.
-            drop(base);
-        }
-
-        #[cfg(since_api = "4.2")]
         {
             let stats = self.stats.clone();
 
@@ -140,7 +113,7 @@ impl IntegrationTests {
                 );
 
                 // Calling deferred to break a potentially synchronous call stack and avoid re-entrancy.
-                on_finished.call(&[result.to_variant()]);
+                on_finished.call_deferred(vslice![result]);
             };
 
             Self::run_async_rust_tests(
@@ -153,6 +126,13 @@ impl IntegrationTests {
         }
     }
 
+    /// Queried by some `.gd` tests to check whether they can call into conditionally-compiled Rust classes.
+    #[func]
+    fn is_full_codegen() -> bool {
+        cfg!(feature = "codegen-full")
+    }
+
+    #[allow(clippy::uninlined_format_args)]
     #[func]
     fn run_all_benchmarks(&mut self, scene_tree: Gd<Node>) {
         if self.focus_run {
@@ -216,7 +196,6 @@ impl IntegrationTests {
         }
     }
 
-    #[cfg(since_api = "4.2")]
     fn run_async_rust_tests(
         stats: TestStats,
         tests: Vec<AsyncRustTestCase>,
@@ -238,7 +217,6 @@ impl IntegrationTests {
         Self::run_async_rust_tests_step(tests_iter, first_test, ctx, stats, None, on_finalize_test);
     }
 
-    #[cfg(since_api = "4.2")]
     fn run_async_rust_tests_step(
         mut tests_iter: impl Iterator<Item = AsyncRustTestCase> + 'static,
         test: AsyncRustTestCase,
@@ -389,7 +367,7 @@ impl IntegrationTests {
 
         print!("\n{FMT_CYAN}{space}", space = " ".repeat(36));
         for metrics in bencher::metrics() {
-            print!("{:>13}", metrics);
+            print!("{metrics:>13}");
         }
         print!("{FMT_END}");
 
@@ -398,7 +376,7 @@ impl IntegrationTests {
             print_bench_pre(bench.name, bench.file, last_file.as_deref());
             last_file = Some(bench.file.to_string());
 
-            let result = bencher::run_benchmark(bench.function, bench.repetitions);
+            let result = (bench.function)();
             print_bench_post(result);
         }
     }
@@ -454,7 +432,6 @@ fn run_rust_test(test: &RustTestCase, ctx: &TestContext) -> TestOutcome {
     TestOutcome::from_bool(success.is_ok())
 }
 
-#[cfg(since_api = "4.2")]
 fn run_async_rust_test(
     test: &AsyncRustTestCase,
     ctx: &TestContext,
@@ -476,14 +453,12 @@ fn run_async_rust_test(
     check_async_test_task(task_handle, on_test_finished, ctx);
 }
 
-#[cfg(since_api = "4.2")]
 fn check_async_test_task(
     task_handle: godot::task::TaskHandle,
     on_test_finished: impl FnOnce(TestOutcome) + 'static,
     ctx: &TestContext,
 ) {
     use godot::classes::object::ConnectFlags;
-    use godot::obj::EngineBitfield;
     use godot::task::has_godot_task_panicked;
 
     if !task_handle.is_pending() {
@@ -498,7 +473,7 @@ fn check_async_test_task(
     let mut callback = Some(on_test_finished);
     let mut probably_task_handle = Some(task_handle);
 
-    let deferred = Callable::from_local_fn("run_async_rust_test", move |_| {
+    let deferred = Callable::from_fn("run_async_rust_test", move |_| {
         check_async_test_task(
             probably_task_handle
                 .take()
@@ -508,15 +483,12 @@ fn check_async_test_task(
                 .expect("Callable should not be called multiple times!"),
             &next_ctx,
         );
-        Ok(Variant::nil())
     });
 
     ctx.scene_tree
         .get_tree()
         .expect("The itest scene tree node is part of a Godot SceneTree")
-        .connect_ex("process_frame", &deferred)
-        .flags(ConnectFlags::ONE_SHOT.ord() as u32)
-        .done();
+        .connect_flags("process_frame", &deferred, ConnectFlags::ONE_SHOT);
 }
 
 fn print_test_pre(test_case: &str, test_file: &str, last_file: Option<&str>, flush: bool) {
@@ -574,19 +546,27 @@ fn print_bench_pre(benchmark: &str, bench_file: &str, last_file: Option<&str>) {
 }
 
 fn print_bench_post(result: BenchResult) {
-    for stat in result.stats.iter() {
-        print!(" {:>10.3}μs", stat.as_nanos() as f64 / 1000.0);
+    match result {
+        Ok(measured) => {
+            for stat in measured.stats.iter() {
+                print!(" {:>10.3}μs", stat.as_nanos() as f64 / 1000.0);
+            }
+        }
+        Err(msg) => {
+            print!("   {FMT_RED}ERROR: {msg}{FMT_END}");
+        }
     }
+
     println!();
 }
 
 fn get_property(test: &Variant, property: &str) -> String {
-    test.call("get", &[property.to_variant()]).to::<String>()
+    test.call("get", vslice![property]).to::<String>()
 }
 
 fn get_execution_time(test: &Variant) -> Option<Duration> {
     let seconds = test
-        .call("get", &["execution_time_seconds".to_variant()])
+        .call("get", vslice!["execution_time_seconds"])
         .try_to::<f64>()
         .ok()?;
 
@@ -594,35 +574,19 @@ fn get_execution_time(test: &Variant) -> Option<Duration> {
 }
 
 fn get_errors(test: &Variant) -> Array<GString> {
-    test.call("get", &["errors".to_variant()])
+    test.call("get", vslice!["errors"])
         .try_to::<Array<GString>>()
         .unwrap_or_default()
 }
 
 struct RustTestCases {
     rust_tests: Vec<RustTestCase>,
-    #[cfg(since_api = "4.2")]
     async_rust_tests: Vec<AsyncRustTestCase>,
     rust_test_count: usize,
     rust_file_count: usize,
     focus_run: bool,
 }
 
-#[cfg(before_api = "4.2")]
-fn collect_rust_tests(filters: &[String]) -> RustTestCases {
-    let (rust_tests, rust_files, focus_run) = super::collect_rust_tests(filters);
-
-    let rust_test_count = rust_tests.len();
-
-    RustTestCases {
-        rust_tests,
-        rust_test_count,
-        rust_file_count: rust_files.len(),
-        focus_run,
-    }
-}
-
-#[cfg(since_api = "4.2")]
 fn collect_rust_tests(filters: &[String]) -> RustTestCases {
     let (mut rust_tests, mut rust_files, focus_run) = super::collect_rust_tests(filters);
 

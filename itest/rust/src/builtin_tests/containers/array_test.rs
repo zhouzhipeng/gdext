@@ -5,9 +5,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use godot::meta::{wrapped, ElementType};
 use godot::prelude::*;
 
-use crate::framework::{expect_panic, itest};
+use crate::framework::{assert_match, create_gdscript, expect_panic, itest};
 
 #[itest]
 fn array_default() {
@@ -101,7 +102,7 @@ fn array_iter_shared() {
 fn array_hash() {
     let array = array![1, 2];
     // Just testing that it converts successfully from i64 to u32.
-    array.hash();
+    array.hash_u32();
 }
 
 #[itest]
@@ -135,14 +136,31 @@ fn array_duplicate_deep() {
 }
 
 #[itest]
+#[allow(clippy::reversed_empty_ranges)]
 fn array_subarray_shallow() {
     let array = array![0, 1, 2, 3, 4, 5];
-    let slice = array.subarray_shallow(5, 1, Some(-2));
+
+    let normal_slice = array.subarray_shallow(4..=5, None);
+    assert_eq!(normal_slice, array![4, 5]);
+
+    let slice = array.subarray_shallow(5..1, Some(-2));
     assert_eq!(slice, array![5, 3]);
+
+    let negative_slice = array.subarray_shallow(wrapped(-1..-5), Some(-2));
+    assert_eq!(negative_slice, array![5, 3]);
+
+    let other_negative_slice = array.subarray_shallow(wrapped(-1..3), Some(-1));
+    assert_eq!(other_negative_slice, array![5, 4]);
+
+    let clamped_slice = array.subarray_shallow(wrapped(100..-1), None);
+    assert_eq!(clamped_slice, array![]);
+
+    let other_clamped_slice = array.subarray_shallow(5.., Some(2));
+    assert_eq!(other_clamped_slice, array![5]);
 
     let subarray = array![2, 3];
     let array = varray![1, subarray];
-    let slice = array.subarray_shallow(1, 2, None);
+    let slice = array.subarray_shallow(1..2, None);
     Array::<i64>::try_from_variant(&slice.at(0))
         .unwrap()
         .set(0, 4);
@@ -150,14 +168,31 @@ fn array_subarray_shallow() {
 }
 
 #[itest]
+#[allow(clippy::reversed_empty_ranges)]
 fn array_subarray_deep() {
     let array = array![0, 1, 2, 3, 4, 5];
-    let slice = array.subarray_deep(5, 1, Some(-2));
+
+    let normal_slice = array.subarray_deep(4..=5, None);
+    assert_eq!(normal_slice, array![4, 5]);
+
+    let slice = array.subarray_deep(5..1, Some(-2));
     assert_eq!(slice, array![5, 3]);
+
+    let negative_slice = array.subarray_deep(wrapped(-1..-5), Some(-2));
+    assert_eq!(negative_slice, array![5, 3]);
+
+    let other_negative_slice = array.subarray_deep(wrapped(-1..3), Some(-1));
+    assert_eq!(other_negative_slice, array![5, 4]);
+
+    let clamped_slice = array.subarray_deep(wrapped(100..-1), None);
+    assert_eq!(clamped_slice, array![]);
+
+    let other_clamped_slice = array.subarray_deep(5.., Some(2));
+    assert_eq!(other_clamped_slice, array![5]);
 
     let subarray = array![2, 3];
     let array = varray![1, subarray];
-    let slice = array.subarray_deep(1, 2, None);
+    let slice = array.subarray_deep(1..2, None);
     Array::<i64>::try_from_variant(&slice.at(0))
         .unwrap()
         .set(0, 4);
@@ -249,6 +284,21 @@ fn array_set() {
     expect_panic("Array index 2 out of bounds: length is 2", move || {
         array.set(2, 4);
     });
+}
+
+#[itest]
+fn array_set_readonly() {
+    let mut array = array![1, 2].into_read_only();
+
+    #[cfg(safeguards_balanced)]
+    expect_panic("Mutating read-only array with balanced safeguards", || {
+        array.set(0, 3);
+    });
+
+    #[cfg(not(safeguards_balanced))]
+    array.set(0, 3); // silently fails.
+
+    assert_eq!(array.at(0), 1);
 }
 
 #[itest]
@@ -384,9 +434,11 @@ fn untyped_array_return_from_godot_func() {
     assert_eq!(result, varray![child, Variant::nil(), NodePath::default()]);
 }
 
-// TODO All API functions that take a `Array` are even more obscure and not included in
-// `SELECTED_CLASSES`. Decide if this test is worth having `Texture2DArray` and `Image` and their
-// ancestors in the list.
+// Conditional, so we don't need Texture2DArray > ImageTextureLayered > TextureLayered > Texture in minimal codegen.
+// Potential alternatives (search for "typedarray::" in extension_api.json):
+// - ClassDB::class_get_signal_list() -> Array<Dictionary>
+// - Compositor::set_compositor_effects( Array<Gd<Compositor>> )
+#[cfg(feature = "codegen-full-experimental")]
 #[itest]
 fn typed_array_pass_to_godot_func() {
     use godot::classes::image::Format;
@@ -464,7 +516,6 @@ fn array_sort_unstable() {
 }
 
 #[itest]
-#[cfg(since_api = "4.2")]
 fn array_sort_unstable_by() {
     let mut array: Array<i32> = array![2, 1, 4, 3];
     array.sort_unstable_by(|a, b| a.cmp(b));
@@ -472,7 +523,6 @@ fn array_sort_unstable_by() {
 }
 
 #[itest]
-#[cfg(since_api = "4.2")]
 fn array_sort_unstable_custom() {
     let mut a = array![1, 2, 3, 4];
     let func = backwards_sort_callable();
@@ -492,7 +542,6 @@ fn array_bsearch() {
 }
 
 #[itest]
-#[cfg(since_api = "4.2")]
 fn array_bsearch_by() {
     let a: Array<i32> = array![1, 2, 4, 5];
 
@@ -505,20 +554,11 @@ fn array_bsearch_by() {
 }
 
 #[itest]
-#[cfg(since_api = "4.2")]
-fn array_bsearch_custom() {
+fn array_fops_bsearch_custom() {
     let a = array![5, 4, 2, 1];
     let func = backwards_sort_callable();
-    assert_eq!(a.bsearch_custom(1, &func), 3);
-    assert_eq!(a.bsearch_custom(3, &func), 2);
-}
-
-#[cfg(since_api = "4.2")]
-fn backwards_sort_callable() -> Callable {
-    Callable::from_local_fn("sort backwards", |args: &[&Variant]| {
-        let res = args[0].to::<i32>() > args[1].to::<i32>();
-        Ok(res.to_variant())
-    })
+    assert_eq!(a.functional_ops().bsearch_custom(1, &func), 3);
+    assert_eq!(a.functional_ops().bsearch_custom(3, &func), 2);
 }
 
 #[itest]
@@ -552,6 +592,187 @@ fn array_resize() {
     a.resize(0, &new);
     assert_eq!(a, Array::new());
 }
+
+fn __array_type_inference() {
+    let a = Node::new_alloc();
+    let b = Node2D::new_alloc(); // will be implicitly upcast.
+    let _array: Array<Gd<Node>> = array![&a, &b];
+
+    let c = ArrayTest::new_gd();
+    let d = ArrayTest::new_gd();
+    let _array: Array<Gd<ArrayTest>> = array![&c, &d];
+    // Earlier versions supported `let _array = array[&a, &b]`. This is nice, but allows no upcasting support -- it's a trade-off.
+}
+
+#[itest]
+fn array_element_type() {
+    // Untyped array.
+    let untyped = VariantArray::new();
+    assert!(
+        matches!(untyped.element_type(), ElementType::Untyped),
+        "expected untyped array for VariantArray"
+    );
+
+    let builtin_int = Array::<i64>::new();
+    assert_match!(
+        builtin_int.element_type(),
+        ElementType::Builtin(VariantType::INT),
+    );
+
+    let builtin_string = Array::<GString>::new();
+    assert_match!(
+        builtin_string.element_type(),
+        ElementType::Builtin(VariantType::STRING),
+    );
+
+    let class_array = Array::<Gd<Node>>::new();
+    assert_match!(class_array.element_type(), ElementType::Class(class_name));
+    assert_eq!(class_name.to_string(), "Node");
+
+    let extension_class_array = Array::<Gd<ArrayTest>>::new();
+    assert_match!(
+        extension_class_array.element_type(),
+        ElementType::Class(class_name),
+    );
+    assert_eq!(class_name, ArrayTest::class_id());
+}
+
+#[itest]
+fn array_element_type_custom_script() {
+    let gdscript = create_gdscript(
+        r#"
+extends RefCounted
+class_name CustomScriptForArrays
+
+func make_array() -> Array[CustomScriptForArrays]:
+    return [self]
+"#,
+    );
+
+    let mut object = RefCounted::new_gd();
+    object.set_script(&gdscript);
+
+    // Invoke script to return an array of itself.
+    let result = object.call("make_array", &[]);
+    let array = result.to::<Array<Gd<RefCounted>>>();
+    let element_type = array.element_type();
+
+    let ElementType::ScriptClass(script) = element_type else {
+        panic!("expected CustomScript for array");
+    };
+
+    let script = script.script().expect("script object should be alive");
+    assert_eq!(script, gdscript.upcast());
+    assert_eq!(script.get_name(), GString::new()); // Resource name.
+    assert_eq!(script.get_instance_base_type(), "RefCounted".into());
+
+    #[cfg(since_api = "4.3")]
+    assert_eq!(script.get_global_name(), "CustomScriptForArrays".into());
+}
+
+// Test that proper type has been set&cached while creating new Array.
+// https://github.com/godot-rust/gdext/pull/1357
+#[itest]
+fn array_inner_type() {
+    let primary = Array::<Dictionary>::new();
+
+    let secondary = primary.duplicate_shallow();
+    assert_eq!(secondary.element_type(), primary.element_type());
+
+    let secondary = primary.duplicate_deep();
+    assert_eq!(secondary.element_type(), primary.element_type());
+
+    let subarray = primary.subarray_deep(.., None);
+    assert_eq!(subarray.element_type(), primary.element_type());
+
+    let subarray = primary.subarray_shallow(.., None);
+    assert_eq!(subarray.element_type(), primary.element_type());
+}
+
+#[itest]
+fn array_fops_filter() {
+    let is_even = is_even_callable();
+
+    let array = array![1, 2, 3, 4, 5, 6];
+    assert_eq!(array.functional_ops().filter(&is_even), array![2, 4, 6]);
+}
+
+#[itest]
+fn array_fops_map() {
+    let f = Callable::from_fn("round", |args| args[0].to::<f64>().round() as i64);
+
+    let array = array![0.7, 1.0, 1.3, 1.6];
+    let result = array.functional_ops().map(&f);
+
+    assert_eq!(result, varray![1, 1, 1, 2]);
+}
+
+#[itest]
+fn array_fops_reduce() {
+    let f = Callable::from_fn("sum", |args| args[0].to::<i64>() + args[1].to::<i64>());
+
+    let array = array![1, 2, 3, 4];
+    let result = array.functional_ops().reduce(&f, &0.to_variant());
+
+    assert_eq!(result.to::<i64>(), 10);
+}
+
+#[itest]
+fn array_fops_any() {
+    let is_even = is_even_callable();
+
+    assert!(array![1, 2, 3].functional_ops().any(&is_even));
+    assert!(!array![1, 3, 5].functional_ops().any(&is_even));
+}
+
+#[itest]
+fn array_fops_all() {
+    let is_even = is_even_callable();
+
+    assert!(!array![1, 2, 3].functional_ops().all(&is_even));
+    assert!(array![2, 4, 6].functional_ops().all(&is_even));
+}
+
+#[itest]
+#[cfg(since_api = "4.4")]
+fn array_fops_find_custom() {
+    let is_even = is_even_callable();
+
+    let array = array![1, 2, 3, 4, 5];
+    assert_eq!(array.functional_ops().find_custom(&is_even, None), Some(1));
+
+    let array = array![1, 3, 5];
+    assert_eq!(array.functional_ops().find_custom(&is_even, None), None);
+}
+
+#[itest]
+#[cfg(since_api = "4.4")]
+fn array_fops_rfind_custom() {
+    let is_even = is_even_callable();
+
+    let array = array![1, 2, 3, 4, 5];
+    assert_eq!(array.functional_ops().rfind_custom(&is_even, None), Some(3));
+
+    let array = array![1, 3, 5];
+    assert_eq!(array.functional_ops().rfind_custom(&is_even, None), None);
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Helper functions for creating callables.
+
+fn backwards_sort_callable() -> Callable {
+    // No &[&Variant] explicit type in arguments.
+    Callable::from_fn("sort backwards", |args| {
+        args[0].to::<i32>() > args[1].to::<i32>()
+    })
+}
+
+fn is_even_callable() -> Callable {
+    Callable::from_fn("is even", |args| args[0].to::<i64>() % 2 == 0)
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Class definitions
 
 #[derive(GodotClass, Debug)]
 #[class(init, base=RefCounted)]

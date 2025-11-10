@@ -7,8 +7,9 @@
 
 use std::collections::HashSet;
 
+use godot::builtin::{static_sname, Encoding, GString, NodePath, StringName};
+
 use crate::framework::{assert_eq_self, itest};
-use godot::builtin::{Encoding, GString, NodePath, StringName};
 
 #[itest]
 fn string_name_default() {
@@ -27,11 +28,6 @@ fn string_name_conversion() {
     let back = GString::from(&name);
 
     assert_eq!(string, back);
-
-    let second = StringName::from(string.clone());
-    let back = GString::from(second);
-
-    assert_eq!(string, back);
 }
 
 #[itest]
@@ -39,11 +35,6 @@ fn string_name_node_path_conversion() {
     let string = StringName::from("some string");
     let name = NodePath::from(&string);
     let back = StringName::from(&name);
-
-    assert_eq!(string, back);
-
-    let second = NodePath::from(string.clone());
-    let back = StringName::from(second);
 
     assert_eq!(string, back);
 }
@@ -126,7 +117,6 @@ fn string_name_is_empty() {
 }
 
 #[itest]
-#[cfg(since_api = "4.2")]
 fn string_name_from_cstr() {
     use std::ffi::CStr;
 
@@ -137,11 +127,35 @@ fn string_name_from_cstr() {
     ];
 
     for (bytes, string) in cases.into_iter() {
-        let a = StringName::from(bytes);
+        let a = StringName::__cstr(bytes);
         let b = StringName::from(string);
 
         assert_eq!(a, b);
     }
+}
+
+#[itest]
+fn string_name_static_sname() {
+    let a = static_sname!(c"pure ASCII\t[~]").clone();
+    let b = StringName::from("pure ASCII\t[~]");
+
+    assert_eq!(a, b);
+
+    let a1 = a.clone();
+    let a2 = static_sname!(c"pure ASCII\t[~]").clone();
+
+    assert_eq!(a, a1);
+    assert_eq!(a1, a2);
+
+    let a = static_sname!(c"\xB1").clone();
+    let b = StringName::from("±");
+
+    assert_eq!(a, b);
+
+    let a = static_sname!(c"Latin-1 \xA3 \xB1 text \xBE").clone();
+    let b = StringName::from("Latin-1 £ ± text ¾");
+
+    assert_eq!(a, b);
 }
 
 #[itest]
@@ -173,5 +187,13 @@ crate::generate_string_bytes_and_cstr_tests!(
         string_name_from_cstr_latin1,
         string_name_from_bytes_utf8,
         string_name_from_cstr_utf8,
+    ]
+);
+
+crate::generate_string_standard_fmt_tests!(
+    builtin: StringName,
+    tests: [
+        string_name_display,
+        string_name_standard_pad,
     ]
 );

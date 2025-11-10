@@ -12,13 +12,11 @@
 
 use std::collections::HashMap;
 
-use crate::framework::itest;
 use godot::global::PropertyUsageFlags;
 use godot::prelude::*;
 use godot::sys::GdextBuild;
 
-use crate::framework::TestContext;
-
+use crate::framework::{itest, TestContext};
 use crate::register_tests::gen_ffi::PropertyTestsRust;
 
 #[itest]
@@ -33,14 +31,14 @@ fn property_template_test(ctx: &TestContext) {
     for property in rust_properties.get_property_list().iter_shared() {
         let name = property.get("name").unwrap().to::<String>();
 
-        // The format of array properties in Godot 4.2 changed. This doesn't seem to cause issues if we
-        // compile against 4.1 and provide the property in the format 4.1 expects, but run it with Godot 4.2.
-        // However, this test checks that our output matches that of Godot, and so would fail in this circumstance.
-        // For now, just ignore array properties when we compile for 4.1 but run in 4.2.
-        if GdextBuild::since_api("4.2")
-            && cfg!(before_api = "4.2")
-            && name.starts_with("var_array_")
-        {
+        // Skip @export_file and similar properties for Array<GString> and PackedStringArray (only supported in Godot 4.3+).
+        // Here, we use API and not runtime level, because inclusion/exclusion of GDScript code is determined at build time in godot-bindings.
+        // Anecdote: the format of array properties changed in Godot 4.2.
+        //
+        // Name can start in `export_file`, `export_global_file`, `export_dir`, `export_global_dir`.
+        // Can end in either `_array` or `_parray`.
+        #[cfg(before_api = "4.3")]
+        if (name.contains("_file_") || name.contains("_dir_")) && name.ends_with("array") {
             continue;
         }
 
@@ -60,11 +58,15 @@ fn property_template_test(ctx: &TestContext) {
 
         let mut rust_usage = rust_prop.at("usage").to::<i64>();
 
-        // the GDSscript variables are script variables, and so have `PROPERTY_USAGE_SCRIPT_VARIABLE` set.
-        if rust_usage == PropertyUsageFlags::STORAGE.ord() as i64 {
-            // `PROPERTY_USAGE_SCRIPT_VARIABLE` does the same thing as `PROPERTY_USAGE_STORAGE` and so
-            // GDScript doesn't set both if it doesn't need to.
-            rust_usage = PropertyUsageFlags::SCRIPT_VARIABLE.ord() as i64
+        // The GDSscript variables are script variables, and so have `PROPERTY_USAGE_SCRIPT_VARIABLE` set.
+        // Before 4.3, `PROPERTY_USAGE_SCRIPT_VARIABLE` did the same thing as `PROPERTY_USAGE_STORAGE` and
+        // so GDScript didn't set both if it didn't need to.
+        if GdextBuild::before_api("4.3") {
+            if rust_usage == PropertyUsageFlags::STORAGE.ord() as i64 {
+                rust_usage = PropertyUsageFlags::SCRIPT_VARIABLE.ord() as i64
+            } else {
+                rust_usage |= PropertyUsageFlags::SCRIPT_VARIABLE.ord() as i64;
+            }
         } else {
             rust_usage |= PropertyUsageFlags::SCRIPT_VARIABLE.ord() as i64;
         }
@@ -93,14 +95,24 @@ fn property_template_test(ctx: &TestContext) {
                 "mismatch in property {name}:\n  GDScript: {gdscript_prop:?}\n  Rust:     {rust_prop:?}"
             ));
         }
+        /*else { // Keep around for debugging.
+            println!(
+                "good property {name}:\n  GDScript: {gdscript_prop:?}\n  Rust:     {rust_prop:?}"
+            );
+        }*/
     }
+
+    rust_properties.free();
 
     assert!(
         properties.is_empty(),
         "not all properties were matched, missing: {properties:?}"
     );
 
-    assert!(errors.is_empty(), "{}", errors.join("\n"));
-
-    rust_properties.free();
+    assert!(
+        errors.is_empty(),
+        "Encountered {} mismatches between GDScript and Rust:\n{}",
+        errors.len(),
+        errors.join("\n")
+    );
 }

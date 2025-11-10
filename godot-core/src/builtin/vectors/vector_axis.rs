@@ -16,7 +16,7 @@ macro_rules! impl_vector_axis_enum {
         ///
         #[doc = concat!("`", stringify!($Vector), "` implements `Index<", stringify!($AxisEnum), ">` and `IndexMut<", stringify!($AxisEnum), ">`")]
         #[doc = ", so you can use this type to access a vector component as `vec[axis]`."]
-        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
         #[repr(i32)]
         pub enum $AxisEnum {
             $(
@@ -47,12 +47,24 @@ macro_rules! impl_vector_axis_enum {
                 }
             }
 
-            fn godot_name(&self) -> &'static str {
-                match *self {
+            fn values() -> &'static [Self] {
+                // For vector axis enums, all values are distinct, so both are the same
+                &[
+                    $( $AxisEnum::$axis, )+
+                ]
+            }
+
+            fn all_constants() -> &'static [crate::meta::inspect::EnumConstant<$AxisEnum>] {
+                use crate::meta::inspect::EnumConstant;
+                const { &[
                     $(
-                        Self::$axis => concat!("AXIS_", stringify!($axis)),
+                        EnumConstant::new(
+                            stringify!($axis),
+                            concat!("AXIS_", stringify!($axis)),
+                            $AxisEnum::$axis
+                        ),
                     )+
-                }
+                ] }
             }
         }
 
@@ -61,9 +73,9 @@ macro_rules! impl_vector_axis_enum {
         }
 
         impl ToGodot for $AxisEnum {
-            type ToVia<'v> = i32;
+            type Pass = crate::meta::ByValue;
 
-            fn to_godot(&self) -> Self::ToVia<'_> {
+            fn to_godot(&self) -> Self::Via {
                 self.ord()
             }
         }

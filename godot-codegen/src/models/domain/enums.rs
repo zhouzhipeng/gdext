@@ -9,10 +9,11 @@
 //!
 //! See also generator/enums.rs for functions related to turning enums into `TokenStream`s.
 
-use crate::models::domain::TyName;
-use crate::util::ident;
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{quote, ToTokens};
+
+use crate::models::domain::TyName;
+use crate::util::ident;
 
 pub struct Enum {
     pub name: Ident,
@@ -22,6 +23,8 @@ pub struct Enum {
     pub is_private: bool,
     pub is_exhaustive: bool,
     pub enumerators: Vec<Enumerator>,
+    /// If the enum is sequential and has a `*_MAX` constant (Godot name), this is the index of it.
+    pub max_index: Option<usize>,
 }
 
 impl Enum {
@@ -73,15 +76,18 @@ impl Enum {
 
     /// Returns the maximum index of an indexable enum.
     ///
-    /// Return `None` if `self` isn't an indexable enum. Meaning it is either a bitfield, or it is an enum that can't be used as an index.
-    pub fn find_index_enum_max(&self) -> Option<usize> {
-        if self.is_bitfield {
+    /// Returns `None` if this is a bitfield, or an enum that isn't sequential with a `*_MAX` enumerator.
+    pub fn find_index_enum_max_impl(
+        is_bitfield: bool,
+        enumerators: &[Enumerator],
+    ) -> Option<usize> {
+        if is_bitfield {
             return None;
         }
 
         // Sort by ordinal value. Allocates for every enum in the JSON, but should be OK (most enums are indexable).
         let enumerators = {
-            let mut enumerators = self.enumerators.clone();
+            let mut enumerators = enumerators.to_vec();
             enumerators.sort_by_key(|v| v.value.to_i64());
             enumerators
         };
@@ -124,7 +130,7 @@ pub struct Enumerator {
     pub value: EnumeratorValue,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub enum EnumeratorValue {
     Enum(i32),
     Bitfield(u64),

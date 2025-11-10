@@ -48,8 +48,9 @@ mod godot_version;
 #[cfg(feature = "api-custom")]
 #[path = ""]
 mod depend_on_custom {
-    use super::*;
     use std::borrow::Cow;
+
+    use super::*;
 
     pub(crate) mod godot_exe;
     pub(crate) mod godot_version;
@@ -77,9 +78,41 @@ mod depend_on_custom {
 pub use depend_on_custom::*;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
+// Custom mode: Generate all files based on user provided JSON.
+
+#[cfg(feature = "api-custom-json")]
+#[path = ""]
+mod depend_on_custom_json {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    pub(crate) mod godot_json;
+    pub(crate) mod godot_version;
+    pub(crate) mod header_gen;
+
+    pub fn load_gdextension_json(watch: &mut StopWatch) -> Cow<'static, str> {
+        let result = godot_json::load_custom_gdextension_json();
+        watch.record("read_api_custom_json");
+        Cow::Owned(result)
+    }
+
+    pub fn write_gdextension_headers(h_path: &Path, rs_path: &Path, watch: &mut StopWatch) {
+        godot_json::write_gdextension_headers(h_path, rs_path, watch);
+    }
+
+    pub(crate) fn get_godot_version() -> GodotVersion {
+        godot_json::read_godot_version()
+    }
+}
+
+#[cfg(feature = "api-custom-json")]
+pub use depend_on_custom_json::*;
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 // Prebuilt mode: Reuse existing files
 
-#[cfg(not(feature = "api-custom"))]
+#[cfg(not(any(feature = "api-custom", feature = "api-custom-json")))]
 #[path = ""]
 mod depend_on_prebuilt {
     use super::*;
@@ -121,7 +154,7 @@ mod depend_on_prebuilt {
     }
 }
 
-#[cfg(not(feature = "api-custom"))]
+#[cfg(not(any(feature = "api-custom", feature = "api-custom-json")))]
 pub use depend_on_prebuilt::*;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -217,24 +250,46 @@ pub fn remove_dir_all_reliable(path: &Path) {
     }
 }
 
-// Duplicates code from `make_gdext_build_struct` in `godot-codegen/generator/gdext_build_struct.rs`.
+/// Concrete check against an API level, not runtime level.
+///
+/// Necessary in `build.rs`, which doesn't itself have the cfgs.
 pub fn before_api(major_minor: &str) -> bool {
-    let mut parts = major_minor.split('.');
-    let queried_major = parts
-        .next()
-        .unwrap()
-        .parse::<u8>()
-        .expect("invalid major version");
-    let queried_minor = parts
-        .next()
-        .unwrap()
-        .parse::<u8>()
-        .expect("invalid minor version");
-    assert_eq!(queried_major, 4, "major version must be 4");
+    let queried_minor = major_minor
+        .strip_prefix("4.")
+        .expect("major version must be 4");
+
+    let queried_minor = queried_minor.parse::<u8>().expect("invalid minor version");
+
     let godot_version = get_godot_version();
     godot_version.minor < queried_minor
 }
 
 pub fn since_api(major_minor: &str) -> bool {
     !before_api(major_minor)
+}
+
+pub fn emit_safeguard_levels() {
+    // Levels: disengaged (0), balanced (1), strict (2)
+    let mut safeguards_level = if cfg!(debug_assertions) { 2 } else { 1 };
+
+    // Override default level with Cargo feature, in dev/release profiles.
+    #[cfg(debug_assertions)]
+    if cfg!(feature = "safeguards-dev-balanced") {
+        safeguards_level = 1;
+    }
+    #[cfg(not(debug_assertions))]
+    if cfg!(feature = "safeguards-release-disengaged") {
+        safeguards_level = 0;
+    }
+
+    println!(r#"cargo:rustc-check-cfg=cfg(safeguards_balanced)"#);
+    println!(r#"cargo:rustc-check-cfg=cfg(safeguards_strict)"#);
+
+    // Emit #[cfg]s cumulatively: strict builds get both balanced and strict.
+    if safeguards_level >= 1 {
+        println!(r#"cargo:rustc-cfg=safeguards_balanced"#);
+    }
+    if safeguards_level >= 2 {
+        println!(r#"cargo:rustc-cfg=safeguards_strict"#);
+    }
 }

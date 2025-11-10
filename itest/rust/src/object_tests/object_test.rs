@@ -11,19 +11,17 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use godot::builtin::{GString, StringName, Variant, Vector3};
+use godot::builtin::{Array, GString, StringName, Variant, Vector3};
 use godot::classes::{
-    file_access, Area2D, Camera3D, Engine, FileAccess, IRefCounted, Node, Node3D, Object,
-    RefCounted,
+    file_access, Engine, FileAccess, IRefCounted, Node, Node2D, Node3D, Object, RefCounted,
 };
-#[allow(deprecated)]
-use godot::global::instance_from_id;
+use godot::global::godot_str;
 use godot::meta::{FromGodot, GodotType, ToGodot};
-use godot::obj::{Base, Gd, Inherits, InstanceId, NewAlloc, NewGd, RawGd};
+use godot::obj::{Base, Gd, Inherits, InstanceId, NewAlloc, NewGd, RawGd, Singleton};
 use godot::register::{godot_api, GodotClass};
 use godot::sys::{self, interface_fn, GodotFfi};
 
-use crate::framework::{expect_panic, itest, TestContext};
+use crate::framework::{expect_panic, expect_panic_or_ub, itest, TestContext};
 
 // TODO:
 // * make sure that ptrcalls are used when possible (i.e. when type info available; maybe GDScript integration test)
@@ -102,17 +100,20 @@ fn object_engine_roundtrip() {
 }
 
 #[itest]
-fn object_null_argument() {
-    // Objects currently use ObjectArg instead of RefArg, so this scenario shouldn't occur. Test can be updated if code is refactored.
+fn object_option_argument() {
+    // Tests following things:
+    // - to_godot() returns Option<&T>
+    // - None maps to None
+    // - Some(gd) maps to Some(&gd)
 
-    let null_obj = Option::<Gd<Node>>::None;
+    let null_obj = None::<Gd<Node>>;
+    let via: Option<&Gd<Node>> = null_obj.to_godot();
+    assert_eq!(via, None);
 
-    let via = null_obj.to_godot();
-    let ffi = via.to_ffi();
-
-    expect_panic("not yet implemented: pass objects through RefArg", || {
-        ffi.to_godot();
-    });
+    let refc = RefCounted::new_gd();
+    let some_obj = Some(refc.clone());
+    let via: Option<&Gd<RefCounted>> = some_obj.to_godot();
+    assert_eq!(via, Some(&refc));
 }
 
 #[itest]
@@ -169,7 +170,7 @@ fn object_instance_id_when_freed() {
     node.clone().free(); // destroys object without moving out of reference
     assert!(!node.is_instance_valid());
 
-    expect_panic("instance_id() on dead object", move || {
+    expect_panic_or_ub("instance_id() on dead object", move || {
         node.instance_id();
     });
 }
@@ -180,36 +181,6 @@ fn object_from_invalid_instance_id() {
 
     Gd::<RefcPayload>::try_from_instance_id(id)
         .expect_err("invalid instance id should not return a valid object");
-}
-
-// `instance_from_id` is a normal FFI call, so works slightly differently from `Gd::try_from_instance_id`.
-#[itest]
-fn object_instance_from_id() {
-    let node = Node::new_alloc();
-
-    assert!(node.is_instance_valid());
-
-    let instance_id = node.instance_id();
-
-    #[allow(deprecated)]
-    let gd_from_instance_id = instance_from_id(instance_id.to_i64())
-        .expect("instance should be valid")
-        .cast::<Node>();
-
-    assert_eq!(gd_from_instance_id, node);
-
-    node.free();
-}
-
-#[itest]
-fn object_instance_from_invalid_id() {
-    #[allow(deprecated)]
-    let gd_from_instance_id = instance_from_id(0);
-
-    assert!(
-        gd_from_instance_id.is_none(),
-        "instance id 0 should never be valid"
-    );
 }
 
 #[itest]
@@ -263,7 +234,7 @@ fn object_user_bind_after_free() {
     let copy = obj.clone();
     obj.free();
 
-    expect_panic("bind() on dead user object", move || {
+    expect_panic_or_ub("bind() on dead user object", move || {
         let _ = copy.bind();
     });
 }
@@ -275,7 +246,7 @@ fn object_user_free_during_bind() {
 
     let copy = obj.clone(); // TODO clone allowed while bound?
 
-    expect_panic("direct free() on user while it's bound", move || {
+    expect_panic_or_ub("direct free() on user while it's bound", move || {
         copy.free();
     });
 
@@ -284,7 +255,14 @@ fn object_user_free_during_bind() {
         obj.is_instance_valid(),
         "object lives on after failed free()"
     );
+
+    let copy = obj.clone();
     obj.free(); // now succeeds
+
+    assert!(
+        !copy.is_instance_valid(),
+        "object is finally destroyed after successful free()"
+    );
 }
 
 #[itest]
@@ -296,7 +274,7 @@ fn object_engine_freed_argument_passing(ctx: &TestContext) {
 
     // Destroy object and then pass it to a Godot engine API.
     node.free();
-    expect_panic("pass freed Gd<T> to Godot engine API (T=Node)", || {
+    expect_panic_or_ub("pass freed Gd<T> to Godot engine API (T=Node)", || {
         tree.add_child(&node2);
     });
 }
@@ -309,10 +287,10 @@ fn object_user_freed_casts() {
 
     // Destroy object and then pass it to a Godot engine API (upcast itself works, see other tests).
     obj.free();
-    expect_panic("Gd<T>::upcast() on dead object (T=user)", || {
+    expect_panic_or_ub("Gd<T>::upcast() on dead object (T=user)", || {
         let _ = obj2.upcast::<Object>();
     });
-    expect_panic("Gd<T>::cast() on dead object (T=user)", || {
+    expect_panic_or_ub("Gd<T>::cast() on dead object (T=user)", || {
         let _ = base_obj.cast::<ObjPayload>();
     });
 }
@@ -327,7 +305,7 @@ fn object_user_freed_argument_passing() {
 
     // Destroy object and then pass it to a Godot engine API (upcast itself works, see other tests).
     obj.free();
-    expect_panic("pass freed Gd<T> to Godot engine API (T=user)", || {
+    expect_panic_or_ub("pass freed Gd<T> to Godot engine API (T=user)", || {
         engine.register_singleton("NeverRegistered", &obj2);
     });
 }
@@ -365,7 +343,7 @@ fn object_user_call_after_free() {
     let mut copy = obj.clone();
     obj.free();
 
-    expect_panic("call() on dead user object", move || {
+    expect_panic_or_ub("call() on dead user object", move || {
         let _ = copy.call("get_instance_id", &[]);
     });
 }
@@ -376,7 +354,7 @@ fn object_engine_use_after_free() {
     let copy = node.clone();
     node.free();
 
-    expect_panic("call method on dead engine object", move || {
+    expect_panic_or_ub("call method on dead engine object", move || {
         copy.get_position();
     });
 }
@@ -387,7 +365,7 @@ fn object_engine_use_after_free_varcall() {
     let mut copy = node.clone();
     node.free();
 
-    expect_panic("call method on dead engine object", move || {
+    expect_panic_or_ub("call method on dead engine object", move || {
         copy.call_deferred("get_position", &[]);
     });
 }
@@ -432,13 +410,13 @@ fn object_dead_eq() {
 
     {
         let lhs = a.clone();
-        expect_panic("Gd::eq() panics when one operand is dead", move || {
+        expect_panic_or_ub("Gd::eq() panics when one operand is dead", move || {
             let _ = lhs == b;
         });
     }
     {
         let rhs = a.clone();
-        expect_panic("Gd::ne() panics when one operand is dead", move || {
+        expect_panic_or_ub("Gd::ne() panics when one operand is dead", move || {
             let _ = b2 != rhs;
         });
     }
@@ -514,10 +492,10 @@ fn check_convert_variant_refcount(obj: Gd<RefCounted>) {
 fn object_engine_convert_variant_nil() {
     let nil = Variant::nil();
 
-    Gd::<Area2D>::try_from_variant(&nil).expect_err("`nil` should not convert to `Gd<Area2D>`");
+    Gd::<Node2D>::try_from_variant(&nil).expect_err("`nil` should not convert to `Gd<Node2D>`");
 
     expect_panic("from_variant(&nil)", || {
-        Gd::<Area2D>::from_variant(&nil);
+        Gd::<Node2D>::from_variant(&nil);
     });
 }
 
@@ -525,14 +503,19 @@ fn object_engine_convert_variant_nil() {
 fn object_engine_convert_variant_error() {
     let refc = RefCounted::new_gd();
     let variant = refc.to_variant();
+    assert_eq!(refc.test_refcount(), Some(2));
 
-    let err = Gd::<Area2D>::try_from_variant(&variant)
-        .expect_err("`Gd<RefCounted>` should not convert to `Gd<Area2D>`");
+    let err = Gd::<Node2D>::try_from_variant(&variant)
+        .expect_err("`Gd<RefCounted>` should not convert to `Gd<Node2D>`");
 
-    assert_eq!(
-        err.to_string(),
-        format!("cannot convert to class Area2D: {refc:?}")
+    // ConvertError::Err holds a copy of the value, i.e. refcount is +1.
+    assert_eq!(refc.test_refcount(), Some(3));
+
+    let expected_debug = format!(
+        "cannot convert to class Node2D: VariantGd {{ id: {}, class: RefCounted, refc: 3 }}",
+        refc.instance_id().to_i64()
     );
+    assert_eq!(err.to_string(), expected_debug);
 }
 
 #[itest]
@@ -705,11 +688,15 @@ fn object_engine_bad_downcast() {
 
 #[itest]
 fn object_engine_accept_polymorphic() {
-    let mut node = Camera3D::new_alloc();
+    let mut node = Node3D::new_alloc();
     let expected_name = StringName::from("Node name");
-    let expected_class = GString::from("Camera3D");
+    let expected_class = GString::from("Node3D");
 
+    // Node::set_name() changed to accept StringName, in https://github.com/godotengine/godot/pull/76560.
+    #[cfg(before_api = "4.5")]
     node.set_name(expected_name.arg());
+    #[cfg(since_api = "4.5")]
+    node.set_name(&expected_name);
 
     let actual_name = accept_node(node.clone());
     assert_eq!(actual_name, expected_name);
@@ -838,7 +825,7 @@ fn object_engine_manual_double_free() {
     let node2 = node.clone();
     node.free();
 
-    expect_panic("double free()", move || {
+    expect_panic_or_ub("double free()", move || {
         node2.free();
     });
 }
@@ -857,7 +844,7 @@ fn object_user_double_free() {
     let obj2 = obj.clone();
     obj.call("free", &[]);
 
-    expect_panic("double free()", move || {
+    expect_panic_or_ub("double free()", move || {
         obj2.free();
     });
 }
@@ -890,6 +877,10 @@ fn object_get_scene_tree(ctx: &TestContext) {
 
     let count = tree.get_child_count();
     assert_eq!(count, 1);
+
+    // Explicit type as regression test: https://github.com/godot-rust/gdext/pull/1385
+    let nodes: Array<Gd<Node>> = tree.get_children();
+    assert_eq!(nodes.len(), 1);
 } // implicitly tested: node does not leak
 
 #[itest]
@@ -923,7 +914,8 @@ impl ObjPayload {
 
     #[func]
     fn do_panic(&self) {
-        panic!("do_panic exploded");
+        // Unicode character as regression test for https://github.com/godot-rust/gdext/issues/384.
+        panic!("do_panic exploded 💥");
     }
 
     // Obtain the line number of the panic!() call above; keep equidistant to do_panic() method.
@@ -954,7 +946,7 @@ impl IRefCounted for RefcPayload {
     }
 
     fn to_string(&self) -> GString {
-        format!("value={}", self.value).into()
+        godot_str!("value={}", self.value)
     }
 }
 
@@ -998,7 +990,9 @@ pub mod object_test_gd {
     }
     use nested::ObjectTest;
 
-    #[godot_api]
+    // Disabling signals allows nested::ObjectTest, which would fail otherwise due to generated decl-macro being out-of-scope.
+    #[godot_api(no_typed_signals)]
+    // #[hint(has_base_field = false)] // if we allow more fine-grained control in the future
     impl nested::ObjectTest {
         #[func]
         fn pass_object(&self, object: Gd<Object>) -> i64 {
@@ -1039,7 +1033,15 @@ pub mod object_test_gd {
 
         #[func]
         fn return_nested_self() -> Array<Gd<<Self as GodotClass>::Base>> {
-            array![&Self::return_self().upcast()]
+            array![&Self::return_self()] // implicit upcast
+        }
+
+        #[func]
+        fn pass_i32(&self, _i: i32) {}
+
+        #[func]
+        fn cause_panic(&self) -> Vector3 {
+            panic!("Rust panics")
         }
     }
 

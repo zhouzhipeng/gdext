@@ -13,15 +13,10 @@ use crate::context::Context;
 use crate::models::json::{JsonBuiltinMethod, JsonClassMethod, JsonUtilityFunction};
 use crate::special_cases;
 
-pub(crate) fn is_builtin_method_excluded(method: &JsonBuiltinMethod) -> bool {
-    // The `cfg` below becomes `false` for api > 4.1 so clippy would complain it's always false.
-    #[allow(clippy::needless_bool)]
-    if method.is_vararg {
-        // Support for calling varargs using gdextension were added in 4.2.
-        cfg!(before_api = "4.2")
-    } else {
-        false
-    }
+pub(crate) fn is_builtin_method_excluded(_method: &JsonBuiltinMethod) -> bool {
+    // Prior to Godot 4.2, builtin varargs (method.is_vararg) weren't supported, but that's now our minimum supported version.
+
+    false
 }
 
 #[cfg(not(feature = "codegen-full"))]
@@ -35,6 +30,16 @@ pub(crate) fn is_class_excluded(_godot_class_name: &str) -> bool {
 }
 
 #[cfg(not(feature = "codegen-full"))]
+pub(crate) fn is_native_struct_excluded(native_struct: &str) -> bool {
+    native_struct == "CaretInfo"
+}
+
+#[cfg(feature = "codegen-full")]
+pub(crate) fn is_native_struct_excluded(_native_struct: &str) -> bool {
+    false
+}
+
+#[cfg(not(feature = "codegen-full"))]
 fn is_type_excluded(ty: &str, ctx: &mut Context) -> bool {
     use crate::conv;
     use crate::models::domain::RustTy;
@@ -43,7 +48,9 @@ fn is_type_excluded(ty: &str, ctx: &mut Context) -> bool {
         match ty {
             RustTy::BuiltinIdent { .. } => false,
             RustTy::BuiltinArray { .. } => false,
+            RustTy::GenericArray => false,
             RustTy::RawPointer { inner, .. } => is_rust_type_excluded(inner),
+            RustTy::SysPointerType { .. } => true,
             RustTy::EngineArray { elem_class, .. } => is_class_excluded(elem_class.as_str()),
             RustTy::EngineEnum {
                 surrounding_class, ..
@@ -122,69 +129,62 @@ pub(crate) fn is_utility_function_excluded(
 // Classes for minimal config
 #[cfg(not(feature = "codegen-full"))]
 const SELECTED_CLASSES: &[&str] = &[
-    "AnimatedSprite2D",
-    "Area2D",
-    "ArrayMesh",
-    "AudioStreamPlayer",
-    "BaseButton",
-    "BoxMesh",
-    "Button",
-    "Camera2D",
-    "Camera3D",
-    "CanvasItem",
-    "CanvasLayer",
-    "ClassDB",
-    "CollisionObject2D",
-    "CollisionShape2D",
-    "Control",
-    "EditorPlugin",
-    "EditorExportPlugin",
-    "Engine",
-    "FileAccess",
-    "GDScript",
-    "HTTPRequest",
-    "Image",
-    "ImageTextureLayered",
-    "Input",
-    "InputEvent",
-    "InputEventAction",
-    "Label",
-    "MainLoop",
-    "Marker2D",
-    "Mesh",
+    // Core class hierarchy
+    "Object",
     "Node",
+    "CanvasItem", // base of Node2D
     "Node2D",
     "Node3D",
-    "Node3DGizmo",
-    "Object",
-    "OS",
-    "PackedScene",
-    "PathFollow2D",
-    "PhysicsBody2D",
-    "PrimitiveMesh",
     "RefCounted",
-    "RenderingServer",
     "Resource",
-    "ResourceFormatLoader",
+    //
+    // Runtime + reflection support
+    "ClassDB",
+    "Engine",
+    "OS",
+    //
+    // Editor plugins
+    "EditorPlugin",
+    "EditorExportPlugin",
+    //
+    // I/O and save/load
     "ResourceLoader",
     "ResourceSaver",
-    "RigidBody2D",
+    "FileAccess",
+    //
+    // Scene (node_test, rpc_test)
+    "MainLoop", // base of SceneTree
     "SceneTree",
-    "SceneTreeTimer",
+    //
+    // Script instances
     "Script",
     "ScriptExtension",
     "ScriptNameCasing",
     "ScriptLanguage",
     "ScriptLanguageExtension",
-    "Sprite2D",
-    "SpriteFrames",
-    "TextServer",
-    "TextServerExtension",
+    "GDScript",
+    //
+    // Example resources
+    "PackedScene", // manual_extensions
     "Texture",
-    "Texture2DArray",
-    "TextureLayered",
-    "Time",
-    "Timer",
+    //
+    // Meshes (virtual_methods_test)
+    "Mesh",
+    "ArrayMesh", // enum_test, 1 case, but small API
+    "PrimitiveMesh",
+    //
+    // Windowing + Input (virtual_methods_test)
     "Viewport",
     "Window",
+    "Input",
+    "InputEvent",
+    "InputEventAction",
+    //
+    // Godot servers (for RID support)
+    "RenderingServer",
+    //
+    // Misc
+    "Time", // usage: enum_test.enum_hash()
+    "HTTPRequest",
+    "ResourceFormatLoader", // TODO: replace?
 ];

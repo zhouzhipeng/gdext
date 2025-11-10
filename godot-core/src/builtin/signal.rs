@@ -5,26 +5,27 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::fmt;
-use std::ptr;
+use std::{fmt, ptr};
 
 use godot_ffi as sys;
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
 
 use crate::builtin::{inner, Array, Callable, Dictionary, StringName, Variant};
+use crate::classes::object::ConnectFlags;
 use crate::classes::Object;
 use crate::global::Error;
 use crate::meta;
 use crate::meta::{FromGodot, GodotType, ToGodot};
 use crate::obj::bounds::DynMemory;
-use crate::obj::{Bounds, Gd, GodotClass, InstanceId};
-use sys::{ffi_methods, GodotFfi};
+use crate::obj::{Bounds, EngineBitfield, Gd, GodotClass, InstanceId};
 
-/// A `Signal` represents a signal of an Object instance in Godot.
+/// Untyped Godot signal.
 ///
-/// Signals are composed of a reference to an `Object` and the name of the signal on this object.
+/// Signals are composed of a pointer to an `Object` and the name of the signal on this object.
+///
+/// In Rust, you might want to work with type-safe signals, available under the [`TypedSignal`](crate::registry::signal::TypedSignal) struct.
 ///
 /// # Godot docs
-///
 /// [`Signal` (stable)](https://docs.godotengine.org/en/stable/classes/class_signal.html)
 pub struct Signal {
     opaque: sys::types::OpaqueSignal,
@@ -67,24 +68,32 @@ impl Signal {
         }
     }
 
-    /// Connects this signal to the specified callable.
+    /// Connect signal to a callable.
     ///
-    /// Optional flags can be also added to configure the connection's behavior (see [`ConnectFlags`](crate::classes::object::ConnectFlags) constants).
+    /// To provide flags, see [`connect_flags()`][Self::connect_flags].
+    pub fn connect(&self, callable: &Callable) -> Error {
+        let error = self.as_inner().connect(callable, 0i64);
+
+        Error::from_godot(error as i32)
+    }
+
+    /// Connect signal to a callable, customizing with flags.
+    ///
+    /// Optional flags can be also added to configure the connection's behavior (see [`ConnectFlags`](ConnectFlags) constants).
     /// You can provide additional arguments to the connected callable by using `Callable::bind`.
     ///
-    /// A signal can only be connected once to the same [`Callable`]. If the signal is already connected,
-    /// returns [`Error::ERR_INVALID_PARAMETER`] and
-    /// pushes an error message, unless the signal is connected with [`ConnectFlags::REFERENCE_COUNTED`](crate::classes::object::ConnectFlags::REFERENCE_COUNTED).
-    /// To prevent this, use [`Self::is_connected`] first to check for existing connections.
-    pub fn connect(&self, callable: &Callable, flags: i64) -> Error {
-        let error = self.as_inner().connect(callable, flags);
+    /// A signal can only be connected once to the same [`Callable`]. If the signal is already connected, returns [`Error::ERR_INVALID_PARAMETER`]
+    /// and pushes an error message, unless the signal is connected with [`ConnectFlags::REFERENCE_COUNTED`](ConnectFlags::REFERENCE_COUNTED).
+    /// To prevent this, check for existing connections with [`is_connected()`][Self::is_connected].
+    pub fn connect_flags(&self, callable: &Callable, flags: ConnectFlags) -> Error {
+        let error = self.as_inner().connect(callable, flags.ord() as i64);
 
         Error::from_godot(error as i32)
     }
 
     /// Disconnects this signal from the specified [`Callable`].
     ///
-    /// If the connection does not exist, generates an error. Use [`Self::is_connected`] to make sure that the connection exists.
+    /// If the connection does not exist, generates an error. Use [`is_connected()`](Self::is_connected) to make sure that the connection exists.
     pub fn disconnect(&self, callable: &Callable) {
         self.as_inner().disconnect(callable);
     }
@@ -105,7 +114,7 @@ impl Signal {
     /// Each connection is represented as a Dictionary that contains three entries:
     ///  - `signal` is a reference to this [`Signal`];
     ///  - `callable` is a reference to the connected [`Callable`];
-    ///  - `flags` is a combination of [`ConnectFlags`](crate::classes::object::ConnectFlags).
+    ///  - `flags` is a combination of [`ConnectFlags`](ConnectFlags).
     ///
     /// _Godot equivalent: `get_connections`_
     pub fn connections(&self) -> Array<Dictionary> {
@@ -157,7 +166,7 @@ impl Signal {
     }
 
     #[doc(hidden)]
-    pub fn as_inner(&self) -> inner::InnerSignal {
+    pub fn as_inner(&self) -> inner::InnerSignal<'_> {
         inner::InnerSignal::from_outer(self)
     }
 }
@@ -166,9 +175,7 @@ impl Signal {
 // The `opaque` in `Signal` is just a pair of pointers, and requires no special initialization or cleanup
 // beyond what is done in `from_opaque` and `drop`. So using `*mut Opaque` is safe.
 unsafe impl GodotFfi for Signal {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::SIGNAL
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::SIGNAL);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Opaque;
         fn new_from_sys;
@@ -194,7 +201,7 @@ impl_builtin_traits! {
     }
 }
 
-crate::meta::impl_godot_as_self!(Signal);
+meta::impl_godot_as_self!(Signal: ByRef);
 
 impl fmt::Debug for Signal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

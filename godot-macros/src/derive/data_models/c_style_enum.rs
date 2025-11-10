@@ -5,11 +5,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::util::bail;
-use crate::ParseResult;
+use std::fmt::Write;
+
 use proc_macro2::{Ident, Span, TokenStream, TokenTree};
 use quote::{quote, ToTokens};
-use std::fmt::Write;
+
+use crate::util::bail;
+use crate::ParseResult;
 
 /// Stores info from C-style enums for use in deriving `GodotConvert` and other related traits.
 #[derive(Clone, Debug)]
@@ -113,7 +115,8 @@ impl CStyleEnum {
         }
 
         quote! {
-            format!(#fmt, #(#fmt_args),*)
+            // & because it is passed to GString::from().
+            &format!(#fmt, #(#fmt_args),*)
         }
     }
 

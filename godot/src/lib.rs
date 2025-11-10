@@ -58,6 +58,47 @@
 //! <br><br>
 //!
 //!
+//! ## Safeguard levels
+//!
+//! godot-rust uses three tiers that differ in the amount of runtime checks and validations that are performed.  \
+//! They can be configured via [Cargo features](#cargo-features).
+//!
+//! - 🛡️ **Strict** (default for dev builds)
+//!
+//!   Lots of additional, sometimes expensive checks. Detects many bugs during development.
+//!   - `Gd::bind/bind_mut()` provides extensive diagnostics to locate runtime borrow errors.
+//!   - `Array` safe conversion checks (for types like `Array<i8>`).
+//!   - RTTI checks on object access (protect against type mismatch edge cases).
+//!   - Geometric invariants (e.g. normalized quaternions).
+//!   - Access to engine APIs outside valid scope.<br><br>
+//!
+//! - ⚖️ **Balanced** (default for release builds)
+//!
+//!   Basic validity and invariant checks, reasonably fast. Within this level, you should not be able to encounter undefined behavior (UB)
+//!   in safe Rust code. Invariant violations may however cause panics and logic errors.
+//!   - Object liveness checks.
+//!   - `Gd::bind/bind_mut()` cause panics on borrow errors.<br><br>
+//!
+//! - ☣️ **Disengaged**
+//!
+//!   Most checks disabled, sacrifices safety for raw speed. This renders a large part of the godot-rust API `unsafe` without polluting the
+//!   code; you opt in via `unsafe impl ExtensionLibrary`.
+//!
+//!   Before using this, measure to ensure you truly need the last bit of performance (balanced should be fast enough for most cases; if not,
+//!   consider bringing it up). Also test your code thoroughly using the other levels first. Undefined behavior and crashes arising
+//!   from using this level are your full responsibility. When reporting a bug, make sure you can reproduce it under the balanced level.
+//!   - Unchecked object access -> instant UB if an object is dead.
+//!   - `Gd::bind/bind_mut()` are unchecked -> UB if mutable aliasing occurs.
+//!
+//! <div class="warning">
+//! <p>Safeguards are a recent addition to godot-rust and need calibrating over time. If you are unhappy with how the <i>balanced</i> level
+//! performs in basic operations, consider bringing it up for discussion. We'd like to offer the <i>disengaged</i> level for power users who
+//! really need it, but it shouldn't be the only choice for decent runtime performance, as it comes with heavy trade-offs.</p>
+//!
+//! <p>As of v0.4, the above checks are not fully implemented yet. Neither are they guarantees; categorization may change over time.</p>
+//! </div>
+//!
+//!
 //! ## Cargo features
 //!
 //! The following features can be enabled for this crate. All of them are off by default.
@@ -69,10 +110,16 @@
 //! * **`api-4-{minor}`**
 //! * **`api-4-{minor}-{patch}`**
 //! * **`api-custom`**
+//! * **`api-custom-json`**
 //!
 //!   Sets the [**API level**](https://godot-rust.github.io/book/toolchain/godot-version.html) to the specified Godot version,
 //!   or a custom-built local binary.
-//!   You can use at most one `api-*` feature. If absent, the current Godot minor version is used, with patch level 0.<br><br>
+//!   You can use at most one `api-*` feature. If absent, the current Godot minor version is used, with patch level 0.
+//!
+//!   `api-custom` feature requires specifying `GODOT4_BIN` environment variable with a path to your Godot4 binary.
+//!
+//!   The `api-custom-json` feature requires specifying `GODOT4_GDEXTENSION_JSON` environment variable with a path
+//!   to your custom-defined `extension_api.json`.<br><br>
 //!
 //! * **`double-precision`**
 //!
@@ -82,7 +129,13 @@
 //! * **`experimental-godot-api`**
 //!
 //!   Access to `godot::classes` APIs that Godot marks "experimental". These are under heavy development and may change at any time.
-//!   If you opt in to this feature, expect breaking changes at compile and runtime.
+//!   If you opt in to this feature, expect breaking changes at compile and runtime.<br><br>
+//!
+//! * **`experimental-required-objs`**
+//!
+//!   Enables _required_ objects in Godot function signatures. When GDExtension advertises parameters or return value as required (non-null), the
+//!   generated code will use `Gd<T>` instead of `Option<Gd<T>>` for type safety. This will undergo many breaking changes as the API evolves;
+//!   we are explicitly excluding this from any SemVer guarantees. Needs Godot 4.6-dev. See <https://github.com/godot-rust/gdext/pull/1383>.
 //!
 //! _Rust functionality toggles:_
 //!
@@ -104,14 +157,18 @@
 //!   Support for WebAssembly exports is still a work-in-progress and is not yet well tested. This feature is in place for users
 //!   to explicitly opt in to any instabilities or rough edges that may result.
 //!
-//!   By default, Wasm threads are enabled and require the flag `"-C", "link-args=-sUSE_PTHREADS=1"` in the `wasm32-unknown-unknown` target.
+//!   Please read [Export to Web](https://godot-rust.github.io/book/toolchain/export-web.html) in the book.
+//!
+//!   By default, Wasm threads are enabled and require the flag `"-C", "link-args=-pthread"` in the `wasm32-unknown-unknown` target.
 //!   This must be kept in sync with Godot's Web export settings (threading support enabled). To disable it, use **additionally* the feature
-//!   `experimental-wasm-nothreads`.<br><br>
+//!   `experimental-wasm-nothreads`.
+//!
+//!   It is recommended to use this feature in combination with `lazy-function-tables` to reduce the size of the generated Wasm binary.<br><br>
 //!
 //! * **`experimental-wasm-nothreads`**
 //!
 //!   Requires the `experimental-wasm` feature. Disables threading support for WebAssembly exports. This needs to be kept in sync with
-//!   Godot's Web export setting (threading support disabled), and must _not_ use the `"-C", "link-args=-sUSE_PTHREADS=1"` flag in the
+//!   Godot's Web export setting (threading support disabled), and must _not_ use the `"-C", "link-args=-pthread"` flag in the
 //!   `wasm32-unknown-unknown` target.<br><br>
 //!
 //! * **`codegen-rustfmt`**
@@ -126,7 +183,19 @@
 //!   This feature requires at least Godot 4.3.
 //!   See also: [`#[derive(GodotClass)]`](register/derive.GodotClass.html#documentation)
 //!
-//! _Integrations:_
+//! _Safeguards:_
+//!
+//! See [Safeguard levels](#safeguard-levels).
+//!
+//! * **`safeguards-dev-balanced`**
+//!
+//!   For the `dev` Cargo profile, use the **balanced** safeguard level instead of the default strict level.<br><br>
+//!
+//! * **`safeguards-release-disengaged`**
+//!
+//!   For the `release` Cargo profile, use the **disengaged** safeguard level instead of the default balanced level.
+//!
+//! _Third-party integrations:_
 //!
 //! * **`serde`**
 //!
@@ -154,25 +223,27 @@ compile_error!(
 
 // See also https://github.com/godotengine/godot/issues/86346.
 // Could technically be moved to godot-codegen to reduce time-to-failure slightly, but would scatter validations even more.
-#[cfg(all(feature = "double-precision", not(feature = "api-custom")))]
-compile_error!("The feature `double-precision` currently requires `api-custom` due to incompatibilities in the GDExtension API JSON.");
+#[cfg(all(
+    feature = "double-precision",
+    not(feature = "api-custom"),
+    not(feature = "api-custom-json")
+))]
+compile_error!("The feature `double-precision` currently requires `api-custom` or `api-custom-json` due to incompatibilities in the GDExtension API JSON. \
+See: https://github.com/godotengine/godot/issues/86346");
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Modules
 
-#[doc(inline)]
-pub use godot_core::{builtin, classes, global, meta, obj, task, tools};
-
 #[doc(hidden)]
 pub use godot_core::possibly_docs as docs;
-
 #[doc(hidden)]
 pub use godot_core::sys;
+#[doc(inline)]
+pub use godot_core::{builtin, classes, global, meta, obj, task, tools};
 
 /// Entry point and global init/shutdown of the library.
 pub mod init {
     pub use godot_core::init::*;
-
     // Re-exports
     pub use godot_macros::gdextension;
 }
@@ -180,18 +251,16 @@ pub mod init {
 /// Register/export Rust symbols to Godot: classes, methods, enums...
 pub mod register {
     pub use godot_core::registry::property;
-    pub use godot_core::registry::signal::*;
-    pub use godot_macros::{godot_api, godot_dyn, Export, GodotClass, GodotConvert, Var};
-
+    pub use godot_core::registry::signal::re_export::*;
     #[cfg(feature = "__codegen-full")]
     pub use godot_core::registry::RpcConfig;
+    pub use godot_macros::{godot_api, godot_dyn, Export, GodotClass, GodotConvert, Var};
 
     /// Re-exports used by proc-macro API.
     #[doc(hidden)]
     pub mod private {
         #[cfg(feature = "__codegen-full")]
         pub use godot_core::registry::class::auto_register_rpcs;
-
         pub use godot_core::registry::godot_register_wrappers::*;
         pub use godot_core::registry::{constant, method};
     }
@@ -210,3 +279,19 @@ pub use godot_core::private;
 
 /// Often-imported symbols.
 pub mod prelude;
+
+/// Tests for code that must not compile.
+// Do not add #[cfg(test)], it seems to break `cargo test -p godot --features godot/api-custom,godot/experimental-required-objs`.
+mod no_compile_tests {
+    /// ```compile_fail
+    /// use godot::prelude::*;
+    /// let mut node: Gd<Node> = todo!();
+    /// let option = Some(node.clone());
+    /// let option: Option<&Gd<Node>> = option.as_ref();
+    ///
+    /// // Following must not compile since `add_child` accepts only required (non-null) arguments. Comment-out for sanity check.
+    /// node.add_child(option);
+    /// ```
+    #[cfg(feature = "experimental-required-objs")]
+    fn __test_invalid_patterns() {}
+}

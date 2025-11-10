@@ -5,15 +5,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::{fmt, ops};
+
 use crate::builtin::Variant;
 use crate::meta::error::ConvertError;
-use crate::meta::{ClassName, FromGodot, GodotConvert, PropertyHintInfo, ToGodot};
+use crate::meta::{ClassId, FromGodot, GodotConvert, PropertyHintInfo, ToGodot};
 use crate::obj::guards::DynGdRef;
 use crate::obj::{bounds, AsDyn, Bounds, DynGdMut, Gd, GodotClass, Inherits, OnEditor};
 use crate::registry::class::{get_dyn_property_hint_string, try_dynify_object};
 use crate::registry::property::{object_export_element_type_string, Export, Var};
 use crate::{meta, sys};
-use std::{fmt, ops};
 
 /// Smart pointer integrating Rust traits via `dyn` dispatch.
 ///
@@ -46,7 +47,7 @@ use std::{fmt, ops};
 /// #[derive(GodotClass)]
 /// #[class(init)]
 /// struct Monster {
-///    #[init(val = 100)]
+///     #[init(val = 100)]
 ///     hitpoints: u16,
 /// }
 ///
@@ -131,35 +132,145 @@ use std::{fmt, ops};
 /// // Now work with the abstract object as usual.
 /// ```
 ///
+/// Any `Gd<T>` where `T` is an engine class can attempt conversion to `DynGd<T, D>` with [`Gd::try_dynify()`] as well.
+///
+/// ```no_run
+/// # use godot::prelude::*;
+/// # use godot::classes::Node2D;
+/// # // ShapeCast2D is marked as experimental and thus not included in the doctests.
+/// # // We use this mock to showcase some real-world usage.
+/// # struct FakeShapeCastCollider2D {}
+///
+/// # impl FakeShapeCastCollider2D {
+/// #     fn get_collider(&self, _idx: i32) -> Option<Gd<Node2D>> { Some(Node2D::new_alloc()) }
+/// # }
+///
+/// trait Pushable { /* ... */ }
+///
+/// # let my_shapecast = FakeShapeCastCollider2D {};
+/// # let idx = 1;
+/// // We can try to convert `Gd<T>` into `DynGd<T, D>`.
+/// let node: Option<DynGd<Node2D, dyn Pushable>> =
+///     my_shapecast.get_collider(idx).and_then(
+///         |obj| obj.try_dynify().ok()
+///     );
+///
+/// // An object is returned after failed conversion, similarly to `Gd::try_cast()`.
+/// # let some_node = Node::new_alloc();
+/// match some_node.try_dynify::<dyn Pushable>() {
+///     Ok(dyn_gd) => (),
+///     Err(some_node) => godot_warn!("Failed to convert {some_node} into dyn Pushable!"),
+/// }
+/// ```
+///
 /// When converting from Godot back into `DynGd`, we say that the `dyn Health` trait object is _re-enriched_.
 ///
 /// godot-rust achieves this thanks to the registration done by `#[godot_dyn]`: the library knows for which classes `Health` is implemented,
 /// and it can query the dynamic type of the object. Based on that type, it can find the `impl Health` implementation matching the correct class.
 /// Behind the scenes, everything is wired up correctly so that you can restore the original `DynGd` even after it has passed through Godot.
 ///
-/// # `#[export]` for `DynGd<T, D>`
+/// # Exporting
 ///
-/// Exporting `DynGd<T, D>` is possible only via [`OnEditor`] or [`Option`].
+/// [Like `Gd<T>`](struct.Gd.html#exporting), using `#[export]` with `DynGd<T, D>` is possible only via [`OnEditor`] or [`Option`].
 /// `DynGd<T, D>` can also be exported directly as an element of an array such as `Array<DynGd<T, D>>`.
 ///
-/// Since `DynGd<T, D>` represents shared functionality `D` across classes inheriting from `T`,
-/// consider using `#[export] Gd<T>` instead of `#[export] DynGd<T, D>`
-/// in cases when `T` is a concrete Rust `GodotClass`.
+/// When talking about "exporting", the following paragraphs assume that you wrap `DynGd` in one of those types.
 ///
-/// ## Node based classes
+/// In cases where `T: AsDyn<D>` (the trait is directly implemented on the user class, i.e. no upcasting), exporting `DynGd<T, D>` is
+/// equivalent to exporting `Gd<T>` regarding Inspector UI.
 ///
-/// `#[export]` for a `DynGd<T, D>` works identically to `#[export]` `Gd<T>` for `T` inheriting Node classes.
-/// Godot will report an error if the conversion fails, but it will only do so when accessing the given value.
+/// ## Node-based classes
 ///
-/// ## Resource based classes
+/// If `T` inherits `Node`, exporting `DynGd<T, D>` works identically to `Gd<T>`.
 ///
-/// `#[export]` for a `DynGd<T, D>` allows you to limit the available choices to implementors of a given trait `D` whose base inherits the specified `T`
-/// (for example, `#[export] Option<DynGd<Resource, dyn MyTrait>>` won't include Rust classes with an Object base, even if they implement `MyTrait`).
+/// If you try to assign a class from the editor that does not implement trait `D`, Godot will report a conversion-failed error,
+/// but it will only do so when accessing the given value.
+///
+/// ## Resource-based classes
+///
+/// If `T` inherits `Resource`, exporting `DynGd<T, D>>` will limit the available choices to known implementors of the trait `D`.
+///
+/// For example, let's say you have four Rust classes:
+///
+/// | Class        | Inherits   | Implements trait |
+/// |--------------|------------|------------------|
+/// | `Bullet`     | `Resource` | `Projectile`     |
+/// | `Rocket`     | `Resource` | `Projectile`     |
+/// | `BulletNode` | `Node`     | `Projectile`     |
+/// | `Tower`      | `Resource` | (none)           |
+///
+/// Then, an exported `DynGd<Resource, dyn Projectile>` would be visible in Godot's Inspector UI with a drop-down field, i.e. users can assign
+/// only objects of certain classes. **The available options for the drop-down are `Bullet` and `Rocket`.** The class `BulletNode` is not
+/// available because it's not a `Resource`, and `Tower` is not because it doesn't implement the `Projectile` trait.
+///
+/// # Type inference
+///
+/// If a class implements more than one `AsDyn<D>` relation (usually via `#[godot_dyn]`), type inference will only work when the trait
+/// used for `D` explicitly declares a `: 'static` bound.
+/// Otherwise, if only one `impl AsDyn` is present for a given class, the type can always be inferred.
+///
+/// ```no_run
+/// # use godot::prelude::*;
+/// trait Health: 'static { /* ... */ }
+///
+/// // Exact equivalent to:
+/// trait OtherHealth
+/// where
+///     Self: 'static
+/// { /* ... */ }
+///
+/// trait NoInference { /* ... */ }
+///
+/// #[derive(GodotClass)]
+/// # #[class(init)]
+/// struct Monster { /* ... */ }
+///
+/// #[godot_dyn]
+/// impl Health for Monster { /* ... */ }
+///
+/// #[godot_dyn]
+/// impl NoInference for Monster { /* ... */ }
+///
+/// // Two example functions accepting trait object, to check type inference.
+/// fn deal_damage(h: &mut dyn Health) { /* ... */ }
+/// fn no_inference(i: &mut dyn NoInference) { /* ... */ }
+///
+/// // Type can be inferred since 'static bound is explicitly declared for Health trait.
+/// let mut dyn_gd = Monster::new_gd().into_dyn();
+/// deal_damage(&mut *dyn_gd.dyn_bind_mut());
+///
+/// // Otherwise type can't be properly inferred.
+/// let mut dyn_gd = Monster::new_gd().into_dyn::<dyn NoInference>();
+/// no_inference(&mut *dyn_gd.dyn_bind_mut());
+/// ```
+///
+/// ```compile_fail
+/// # use godot::prelude::*;
+/// trait Health { /* ... */ }
+///
+/// trait OtherTrait { /* ... */ }
+///
+/// #[derive(GodotClass)]
+/// # #[class(init)]
+/// struct Monster { /* ... */ }
+/// #[godot_dyn]
+/// impl Health for Monster { /* ... */ }
+/// #[godot_dyn]
+/// impl OtherTrait for Monster { /* ... */ }
+///
+/// fn deal_damage(h: &mut dyn Health) { /* ... */ }
+///
+/// // Type can't be inferred.
+/// // Would result in confusing compilation error
+/// // since compiler would try to enforce 'static *lifetime* (&'static mut ...) on our reference.
+/// let mut dyn_gd = Monster::new_gd().into_dyn();
+/// deal_damage(&mut *dyn_gd.dyn_bind_mut());
+/// ```
 pub struct DynGd<T, D>
 where
     // T does _not_ require AsDyn<D> here. Otherwise, it's impossible to upcast (without implementing the relation for all base classes).
     T: GodotClass,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     // Potential optimizations: use single Gd; use Rc/Arc instead of Box+clone; store a downcast fn from Gd<T>; ...
     obj: Gd<T>,
@@ -169,7 +280,7 @@ where
 impl<T, D> DynGd<T, D>
 where
     T: AsDyn<D> + Bounds<Declarer = bounds::DeclUser>,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     pub(crate) fn from_gd(gd_instance: Gd<T>) -> Self {
         let erased_obj = Box::new(gd_instance.clone());
@@ -185,14 +296,14 @@ impl<T, D> DynGd<T, D>
 where
     // Again, T deliberately does not require AsDyn<D> here. See above.
     T: GodotClass,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     /// Acquires a shared reference guard to the trait object `D`.
     ///
     /// The resulting guard implements `Deref<Target = D>`, allowing shared access to the trait's methods.
     ///
     /// See [`Gd::bind()`][Gd::bind] for borrow checking semantics and panics.
-    pub fn dyn_bind(&self) -> DynGdRef<D> {
+    pub fn dyn_bind(&self) -> DynGdRef<'_, D> {
         self.erased_obj.dyn_bind()
     }
 
@@ -201,7 +312,7 @@ where
     /// The resulting guard implements `DerefMut<Target = D>`, allowing exclusive mutable access to the trait's methods.
     ///
     /// See [`Gd::bind_mut()`][Gd::bind_mut] for borrow checking semantics and panics.
-    pub fn dyn_bind_mut(&mut self) -> DynGdMut<D> {
+    pub fn dyn_bind_mut(&mut self) -> DynGdMut<'_, D> {
         self.erased_obj.dyn_bind_mut()
     }
 
@@ -260,8 +371,8 @@ where
         self.try_cast().unwrap_or_else(|from_obj| {
             panic!(
                 "downcast from {from} to {to} failed; instance {from_obj:?}",
-                from = T::class_name(),
-                to = Derived::class_name(),
+                from = T::class_id(),
+                to = Derived::class_id(),
             )
         })
     }
@@ -292,12 +403,19 @@ where
     pub fn into_gd(self) -> Gd<T> {
         self.obj
     }
+
+    /// Represents `null` when passing a dynamic object argument to Godot.
+    ///
+    /// See [`Gd::null_arg()`]
+    pub fn null_arg() -> impl meta::AsArg<Option<DynGd<T, D>>> {
+        meta::NullArg(std::marker::PhantomData)
+    }
 }
 
 impl<T, D> DynGd<T, D>
 where
     T: GodotClass + Bounds<Memory = bounds::MemManual>,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     /// Destroy the manually-managed Godot object.
     ///
@@ -311,7 +429,7 @@ where
 impl<T, D> Clone for DynGd<T, D>
 where
     T: GodotClass,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -355,7 +473,7 @@ where
 impl<T, D> ops::Deref for DynGd<T, D>
 where
     T: GodotClass,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     type Target = Gd<T>;
 
@@ -367,7 +485,7 @@ where
 impl<T, D> ops::DerefMut for DynGd<T, D>
 where
     T: GodotClass,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.obj
@@ -398,9 +516,12 @@ where
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Type erasure
 
-trait ErasedGd<D: ?Sized> {
-    fn dyn_bind(&self) -> DynGdRef<D>;
-    fn dyn_bind_mut(&mut self) -> DynGdMut<D>;
+trait ErasedGd<D>
+where
+    D: ?Sized + 'static,
+{
+    fn dyn_bind(&self) -> DynGdRef<'_, D>;
+    fn dyn_bind_mut(&mut self) -> DynGdMut<'_, D>;
 
     fn clone_box(&self) -> Box<dyn ErasedGd<D>>;
 }
@@ -408,13 +529,13 @@ trait ErasedGd<D: ?Sized> {
 impl<T, D> ErasedGd<D> for Gd<T>
 where
     T: AsDyn<D> + Bounds<Declarer = bounds::DeclUser>,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
-    fn dyn_bind(&self) -> DynGdRef<D> {
+    fn dyn_bind(&self) -> DynGdRef<'_, D> {
         DynGdRef::from_guard::<T>(Gd::bind(self))
     }
 
-    fn dyn_bind_mut(&mut self) -> DynGdMut<D> {
+    fn dyn_bind_mut(&mut self) -> DynGdMut<'_, D> {
         DynGdMut::from_guard::<T>(Gd::bind_mut(self))
     }
 
@@ -439,12 +560,10 @@ where
     T: GodotClass,
     D: ?Sized,
 {
-    type ToVia<'v>
-        = <Gd<T> as ToGodot>::ToVia<'v>
-    where
-        D: 'v;
+    // Delegate to Gd<T> passing strategy.
+    type Pass = <Gd<T> as ToGodot>::Pass;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
+    fn to_godot(&self) -> &Self::Via {
         self.obj.to_godot()
     }
 
@@ -459,38 +578,29 @@ where
     D: ?Sized + 'static,
 {
     fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
-        try_dynify_object(via)
+        match try_dynify_object(via) {
+            Ok(dyn_gd) => Ok(dyn_gd),
+            Err((from_godot_err, obj)) => Err(from_godot_err.into_error(obj)),
+        }
     }
 }
 
-impl<'r, T, D> meta::AsArg<DynGd<T, D>> for &'r DynGd<T, D>
+/*
+// See `impl AsArg for Gd<T>` for why this isn't yet implemented.
+impl<'r, T, TBase, D> meta::AsArg<DynGd<TBase, D>> for &'r DynGd<T, D>
 where
-    T: GodotClass,
+    T: Inherits<TBase>,
+    TBase: GodotClass,
     D: ?Sized + 'static,
 {
-    fn into_arg<'cow>(self) -> meta::CowArg<'cow, DynGd<T, D>>
+    fn into_arg<'arg>(self) -> meta::CowArg<'arg, DynGd<TBase, D>>
     where
-        'r: 'cow, // Original reference must be valid for at least as long as the returned cow.
+        'r: 'arg,
     {
-        meta::CowArg::Borrowed(self)
+        meta::CowArg::Owned(self.clone().upcast::<TBase>())
     }
 }
-
-impl<T, D> meta::ParamType for DynGd<T, D>
-where
-    T: GodotClass,
-    D: ?Sized + 'static,
-{
-    type Arg<'v> = meta::CowArg<'v, DynGd<T, D>>;
-
-    fn owned_to_arg<'v>(self) -> Self::Arg<'v> {
-        meta::CowArg::Owned(self)
-    }
-
-    fn arg_to_ref<'r>(arg: &'r Self::Arg<'_>) -> &'r Self {
-        arg.cow_as_ref()
-    }
-}
+*/
 
 impl<T, D> meta::ArrayElement for DynGd<T, D>
 where
@@ -500,6 +610,16 @@ where
     fn element_type_string() -> String {
         let hint_string = get_dyn_property_hint_string::<T, D>();
         object_export_element_type_string::<T>(hint_string)
+    }
+}
+
+impl<T, D> meta::ArrayElement for Option<DynGd<T, D>>
+where
+    T: GodotClass,
+    D: ?Sized + 'static,
+{
+    fn element_type_string() -> String {
+        DynGd::<T, D>::element_type_string()
     }
 }
 
@@ -518,9 +638,7 @@ where
     }
 }
 
-/// `#[export]` for `Option<DynGd<T, D>>` is available only for `T` being Engine class (such as Node or Resource).
-///
-/// Consider exporting `Option<Gd<T>>` instead of `Option<DynGd<T, D>>` for user-declared GDExtension classes.
+/// See [`DynGd` Exporting](struct.DynGd.html#exporting) section.
 impl<T, D> Export for Option<DynGd<T, D>>
 where
     T: GodotClass + Bounds<Exportable = bounds::Yes>,
@@ -531,7 +649,7 @@ where
     }
 
     #[doc(hidden)]
-    fn as_node_class() -> Option<ClassName> {
+    fn as_node_class() -> Option<ClassId> {
         PropertyHintInfo::object_as_node_class::<T>()
     }
 }
@@ -549,7 +667,7 @@ where
 impl<T, D> GodotConvert for OnEditor<DynGd<T, D>>
 where
     T: GodotClass,
-    D: ?Sized,
+    D: ?Sized + 'static,
 {
     type Via = Option<<DynGd<T, D> as GodotConvert>::Via>;
 }
@@ -569,9 +687,7 @@ where
     }
 }
 
-/// `#[export]` for `OnEditor<DynGd<T, D>>` is available only for `T` being Engine class (such as Node or Resource).
-///
-/// Consider exporting `OnEditor<Gd<T>>` instead of `OnEditor<DynGd<T, D>>` for user-declared GDExtension classes.
+/// See [`DynGd` Exporting](struct.DynGd.html#exporting) section.
 impl<T, D> Export for OnEditor<DynGd<T, D>>
 where
     Self: Var,
@@ -583,7 +699,7 @@ where
     }
 
     #[doc(hidden)]
-    fn as_node_class() -> Option<ClassName> {
+    fn as_node_class() -> Option<ClassId> {
         PropertyHintInfo::object_as_node_class::<T>()
     }
 }

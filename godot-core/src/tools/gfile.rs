@@ -5,6 +5,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::cmp;
+use std::io::{BufRead, ErrorKind, Read, Seek, SeekFrom, Write};
+
 use crate::builtin::{real, GString, PackedByteArray, PackedStringArray, Variant};
 use crate::classes::file_access::{CompressionMode, ModeFlags};
 use crate::classes::FileAccess;
@@ -12,9 +15,6 @@ use crate::global::Error;
 use crate::meta::error::IoError;
 use crate::meta::{arg_into_ref, AsArg};
 use crate::obj::Gd;
-
-use std::cmp;
-use std::io::{BufRead, ErrorKind, Read, Seek, SeekFrom, Write};
 
 /// Open a file for reading or writing.
 ///
@@ -106,13 +106,10 @@ impl GFile {
         arg_into_ref!(path);
 
         let fa = FileAccess::open(path, flags).ok_or_else(|| {
-            std::io::Error::new(
-                ErrorKind::Other,
-                format!(
-                    "can't open file {path} in mode {flags:?}; GodotError: {:?}",
-                    FileAccess::get_open_error()
-                ),
-            )
+            std::io::Error::other(format!(
+                "can't open file {path} in mode {flags:?}; GodotError: {:?}",
+                FileAccess::get_open_error()
+            ))
         })?;
 
         Ok(Self::from_inner(fa))
@@ -133,13 +130,10 @@ impl GFile {
             .compression_mode(compression_mode)
             .done()
             .ok_or_else(|| {
-                std::io::Error::new(
-                    ErrorKind::Other,
-                    format!(
-                        "can't open file {path} in mode {flags:?}; GodotError: {:?}",
-                        FileAccess::get_open_error()
-                    ),
-                )
+                std::io::Error::other(format!(
+                    "can't open file {path} in mode {flags:?}; GodotError: {:?}",
+                    FileAccess::get_open_error()
+                ))
             })?;
 
         Ok(Self::from_inner(fa))
@@ -157,13 +151,10 @@ impl GFile {
         arg_into_ref!(path);
 
         let fa = FileAccess::open_encrypted(path, flags, key).ok_or_else(|| {
-            std::io::Error::new(
-                ErrorKind::Other,
-                format!(
-                    "can't open file {path} in mode {flags:?}; GodotError: {:?}",
-                    FileAccess::get_open_error()
-                ),
-            )
+            std::io::Error::other(format!(
+                "can't open file {path} in mode {flags:?}; GodotError: {:?}",
+                FileAccess::get_open_error()
+            ))
         })?;
 
         Ok(Self::from_inner(fa))
@@ -182,13 +173,10 @@ impl GFile {
         arg_into_ref!(password);
 
         let fa = FileAccess::open_encrypted_with_pass(path, flags, password).ok_or_else(|| {
-            std::io::Error::new(
-                ErrorKind::Other,
-                format!(
-                    "can't open file {path} in mode {flags:?}; GodotError: {:?}",
-                    FileAccess::get_open_error()
-                ),
-            )
+            std::io::Error::other(format!(
+                "can't open file {path} in mode {flags:?}; GodotError: {:?}",
+                FileAccess::get_open_error()
+            ))
         })?;
         Ok(Self::from_inner(fa))
     }
@@ -224,10 +212,9 @@ impl GFile {
         let modified_time = FileAccess::get_modified_time(path);
 
         if modified_time == 0 {
-            Err(std::io::Error::new(
-                ErrorKind::Other,
-                format!("can't retrieve last modified time: {path}"),
-            ))
+            Err(std::io::Error::other(format!(
+                "can't retrieve last modified time: {path}"
+            )))
         } else {
             Ok(modified_time)
         }
@@ -240,10 +227,9 @@ impl GFile {
         let md5 = FileAccess::get_md5(path);
 
         if md5.is_empty() {
-            Err(std::io::Error::new(
-                ErrorKind::Other,
-                format!("failed to compute file's MD5 checksum: {path}"),
-            ))
+            Err(std::io::Error::other(format!(
+                "failed to compute file's MD5 checksum: {path}"
+            )))
         } else {
             Ok(md5)
         }
@@ -256,10 +242,9 @@ impl GFile {
         let sha256 = FileAccess::get_sha256(path);
 
         if sha256.is_empty() {
-            Err(std::io::Error::new(
-                ErrorKind::Other,
-                format!("failed to compute file's SHA-256 checksum: {path}"),
-            ))
+            Err(std::io::Error::other(format!(
+                "failed to compute file's SHA-256 checksum: {path}"
+            )))
         } else {
             Ok(sha256)
         }
@@ -347,9 +332,26 @@ impl GFile {
     ///
     /// Underlying Godot method:
     /// [`FileAccess::get_as_text`](https://docs.godotengine.org/en/stable/classes/class_fileaccess.html#class-fileaccess-method-get-as-text).
+    // For Godot versions before `skip_cr` has been removed, see: https://github.com/godotengine/godot/pull/110867.
     #[doc(alias = "get_as_text")]
+    #[cfg(before_api = "4.6")]
     pub fn read_as_gstring_entire(&mut self, skip_cr: bool) -> std::io::Result<GString> {
         let val = self.fa.get_as_text_ex().skip_cr(skip_cr).done();
+        self.check_error()?;
+        Ok(val)
+    }
+
+    /// Reads the whole file as UTF-8 [`GString`].
+    ///
+    /// To retrieve the file as [`String`] instead, use the [`Read`] trait method
+    /// [`read_to_string()`](https://doc.rust-lang.org/std/io/trait.Read.html#method.read_to_string).
+    ///
+    /// Underlying Godot method:
+    /// [`FileAccess::get_as_text`](https://docs.godotengine.org/en/stable/classes/class_fileaccess.html#class-fileaccess-method-get-as-text).
+    #[doc(alias = "get_as_text")]
+    #[cfg(since_api = "4.6")]
+    pub fn read_as_gstring_entire(&mut self) -> std::io::Result<GString> {
+        let val = self.fa.get_as_text();
         self.check_error()?;
         Ok(val)
     }
@@ -684,10 +686,7 @@ impl GFile {
             return Ok(());
         }
 
-        Err(std::io::Error::new(
-            ErrorKind::Other,
-            format!("GodotError: {:?}", error),
-        ))
+        Err(std::io::Error::other(format!("GodotError: {error:?}")))
     }
 
     // File length cache is stored and kept when possible because `FileAccess::get_length()` turned out to be slowing down
@@ -765,7 +764,7 @@ impl Write for GFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.pack_into_write_buffer(buf);
         self.fa
-            .store_buffer(&self.write_buffer.subarray(0, buf.len()));
+            .store_buffer(&self.write_buffer.subarray(0..buf.len()));
         self.clear_file_length();
         self.check_error()?;
 

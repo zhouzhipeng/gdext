@@ -5,16 +5,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::fmt;
+
+use godot_ffi::{ExtVariantType, GodotFfi, GodotNullableFfi, PtrcallType};
+
 use crate::builtin::Variant;
 use crate::meta::error::ConvertError;
 use crate::meta::{FromGodot, GodotConvert, GodotFfiVariant, ToGodot};
 use crate::sys;
-use godot_ffi::{GodotFfi, GodotNullableFfi, PtrcallType};
-use std::fmt;
 
 /// Simple reference wrapper, used when passing arguments by-ref to Godot APIs.
 ///
-/// This type is often used as the result of [`ToGodot::to_godot()`], if `Self` is not a `Copy` type.
+/// This type is exclusively used at the FFI boundary, to avoid unnecessary cloning of values.
+///
+/// Private type. Cannot be `pub(crate)` because it's used in `#[doc(hidden)]` associate type `GodotType::ToFfi<'f>`, and `GodotType` is public.
+#[doc(hidden)]
 pub struct RefArg<'r, T> {
     /// Only `None` if `T: GodotNullableFfi` and `T::is_null()` is true.
     shared_ref: Option<&'r T>,
@@ -84,17 +89,28 @@ impl<T> ToGodot for RefArg<'_, T>
 where
     T: ToGodot,
 {
-    type ToVia<'v>
-        = T::ToVia<'v>
-    where
-        Self: 'v;
+    type Pass = T::Pass;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
+    fn to_godot(&self) -> crate::meta::ToArg<'_, Self::Via, Self::Pass> {
         let shared_ref = self
             .shared_ref
             .expect("Objects are currently mapped through ObjectArg; RefArg shouldn't be null");
 
         shared_ref.to_godot()
+    }
+
+    fn to_godot_owned(&self) -> Self::Via
+    where
+        Self::Via: Clone,
+    {
+        // Default implementation calls underlying T::to_godot().clone(), which is wrong.
+        // Some to_godot_owned() calls are specialized/overridden, we need to honor that.
+
+        let shared_ref = self
+            .shared_ref
+            .expect("Objects are currently mapped through ObjectArg; RefArg shouldn't be null");
+
+        shared_ref.to_godot_owned()
     }
 }
 
@@ -122,9 +138,7 @@ unsafe impl<T> GodotFfi for RefArg<'_, T>
 where
     T: GodotFfi,
 {
-    fn variant_type() -> sys::VariantType {
-        T::variant_type()
-    }
+    const VARIANT_TYPE: ExtVariantType = T::VARIANT_TYPE;
 
     unsafe fn new_from_sys(_ptr: sys::GDExtensionConstTypePtr) -> Self {
         wrong_direction!(new_from_sys)

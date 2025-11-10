@@ -5,15 +5,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use core::cmp::Ordering;
+use std::cmp::Ordering;
+use std::fmt;
+
 use godot_ffi as sys;
-use sys::{ffi_methods, GodotFfi};
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
 
 use crate::builtin::math::{FloatExt, GlamConv, GlamType};
 use crate::builtin::vectors::Vector3Axis;
 use crate::builtin::{inner, real, Basis, RVec3, Vector2, Vector3i};
-
-use std::fmt;
 
 /// Vector used for 3D math using floating point coordinates.
 ///
@@ -93,15 +93,9 @@ impl_vector_fns!(Vector3, RVec3, real, (x, y, z));
 
 /// # Specialized `Vector3` functions
 impl Vector3 {
-    #[deprecated = "Moved to `Vector3i::cast_float()`"]
-    #[inline]
-    pub const fn from_vector3i(v: Vector3i) -> Self {
-        v.cast_float()
-    }
-
     #[doc(hidden)]
     #[inline]
-    pub fn as_inner(&self) -> inner::InnerVector3 {
+    pub fn as_inner(&self) -> inner::InnerVector3<'_> {
         inner::InnerVector3::from_outer(self)
     }
 
@@ -258,14 +252,12 @@ impl fmt::Display for Vector3 {
 // SAFETY:
 // This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Vector3 {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::VECTOR3
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::VECTOR3);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(Vector3);
+crate::meta::impl_godot_as_self!(Vector3: ByValue);
 
 impl GlamType for RVec3 {
     type Mapped = Vector3;

@@ -5,28 +5,25 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-#![allow(dead_code)]
-
-use crate::framework::{itest, TestContext};
-
 use godot::builtin::{
-    real, varray, Color, GString, PackedByteArray, PackedColorArray, PackedFloat32Array,
-    PackedInt32Array, PackedStringArray, PackedVector2Array, PackedVector3Array, RealConv,
-    StringName, Variant, VariantArray, Vector2, Vector3,
+    real, varray, vslice, Color, GString, PackedByteArray, PackedColorArray, PackedFloat32Array,
+    PackedInt32Array, PackedVector2Array, PackedVector3Array, RealConv, StringName, Variant,
+    VariantArray, Vector2, Vector3,
 };
 use godot::classes::notify::NodeNotification;
-use godot::classes::resource_loader::CacheMode;
 #[cfg(feature = "codegen-full")]
 use godot::classes::Material;
 use godot::classes::{
-    BoxMesh, IEditorPlugin, INode, INode2D, IPrimitiveMesh, IRefCounted, IResourceFormatLoader,
-    IRigidBody2D, InputEvent, InputEventAction, Node, Node2D, Object, PrimitiveMesh, RefCounted,
-    ResourceFormatLoader, ResourceLoader, Viewport, Window,
+    IEditorPlugin, INode, INode2D, IPrimitiveMesh, IRefCounted, InputEvent, InputEventAction, Node,
+    Node2D, Object, PrimitiveMesh, RefCounted, Window,
 };
+use godot::global::godot_str;
 use godot::meta::ToGodot;
 use godot::obj::{Base, Gd, NewAlloc, NewGd};
 use godot::private::class_macros::assert_eq_approx;
 use godot::register::{godot_api, GodotClass};
+
+use crate::framework::{itest, TestContext};
 
 /// Simple class, that deliberately has no constructor accessible from GDScript
 #[derive(GodotClass, Debug)]
@@ -48,7 +45,7 @@ struct VirtualMethodTest {
 #[godot_api]
 impl IRefCounted for VirtualMethodTest {
     fn to_string(&self) -> GString {
-        format!("VirtualMethodTest[integer={}]", self.integer).into()
+        godot_str!("VirtualMethodTest[integer={}]", self.integer)
     }
 }
 
@@ -164,9 +161,9 @@ impl IPrimitiveMesh for VirtualReturnTest {
 
 #[derive(GodotClass, Debug)]
 #[class(base=Node2D)]
-struct VirtualInputTest {
+pub(super) struct VirtualInputTest {
     base: Base<Node2D>,
-    event: Option<Gd<InputEvent>>,
+    pub event: Option<Gd<InputEvent>>,
 }
 
 #[godot_api]
@@ -177,47 +174,6 @@ impl INode2D for VirtualInputTest {
 
     fn input(&mut self, event: Gd<InputEvent>) {
         self.event = Some(event);
-    }
-}
-
-#[derive(GodotClass, Debug)]
-#[class(init, base=ResourceFormatLoader)]
-struct FormatLoaderTest {
-    base: Base<ResourceFormatLoader>,
-}
-
-impl FormatLoaderTest {
-    fn resource_type() -> GString {
-        GString::from("some_resource_type")
-    }
-}
-
-#[godot_api]
-impl IResourceFormatLoader for FormatLoaderTest {
-    fn get_recognized_extensions(&self) -> PackedStringArray {
-        [GString::from("extension")].into_iter().collect()
-    }
-
-    fn handles_type(&self, type_: StringName) -> bool {
-        type_.to_string() == Self::resource_type().to_string()
-    }
-
-    fn get_resource_type(&self, _path: GString) -> GString {
-        Self::resource_type()
-    }
-
-    fn exists(&self, _path: GString) -> bool {
-        true
-    }
-
-    fn load(
-        &self,
-        _path: GString,
-        _original_path: GString,
-        _use_sub_threads: bool,
-        _cache_mode: i32,
-    ) -> Variant {
-        BoxMesh::new_gd().to_variant()
     }
 }
 
@@ -325,7 +281,10 @@ impl IRefCounted for RevertTest {
             // No UB or anything else like a crash or panic should happen when `property_can_revert` and `property_get_revert` return
             // inconsistent values, but in case something like that happens we should be able to detect it through this function.
             "property_changes" => {
-                if INC.fetch_add(1, std::sync::atomic::Ordering::AcqRel) % 2 == 0 {
+                if INC
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                    .is_multiple_of(2)
+                {
                     None
                 } else {
                     Some(true.to_variant())
@@ -333,6 +292,43 @@ impl IRefCounted for RevertTest {
             }
             _ => None,
         }
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+#[derive(GodotClass)]
+#[class(init)]
+struct VirtualGdSelfTest {
+    #[init(val = 4)]
+    some_val: i64,
+}
+
+#[godot_api]
+impl IRefCounted for VirtualGdSelfTest {
+    #[func(gd_self)]
+    fn to_string(_this: Gd<Self>) -> GString {
+        GString::from("Gd<Self>")
+    }
+
+    #[func(gd_self)]
+    fn get_property(this: Gd<Self>, _property: StringName) -> Option<Variant> {
+        // Delegates call to Display which calls `VirtualGdSelfTest::to_string` later in the chain.
+        Some(this.to_string().to_variant())
+    }
+
+    #[func(gd_self)]
+    fn set_property(mut this: Gd<Self>, _property: StringName, value: Variant) -> bool {
+        // Check bind_mut and bind.
+        this.bind_mut().some_val = value.to();
+        this.bind().some_val != 4
+    }
+
+    #[func(gd_self)]
+    fn property_get_revert(this: Gd<Self>, property: StringName) -> Option<Variant> {
+        // Access other virtual method directly.
+        let property = Self::get_property(this, property)?;
+        Some(property)
     }
 }
 
@@ -382,7 +378,7 @@ fn test_ready_dynamic_panic(test_context: &TestContext) {
 
     // NOTE: Current implementation catches panics, but does not propagate them to the user.
     // Godot has no mechanism to transport errors across ptrcalls (e.g. virtual function calls), so this would need to be emulated somehow.
-    let result = test_node.try_call("add_child", &[obj.to_variant()]);
+    let result = test_node.try_call("add_child", vslice![obj]);
     // let err = result.expect_err("add_child() should have panicked");
     let returned = result.expect("at the moment, panics in virtual functions are swallowed");
     assert_eq!(returned, Variant::nil());
@@ -497,32 +493,6 @@ fn test_virtual_method_with_return() {
 }
 
 #[itest]
-fn test_format_loader(_test_context: &TestContext) {
-    let format_loader = FormatLoaderTest::new_gd();
-
-    let mut loader = ResourceLoader::singleton();
-    loader
-        .add_resource_format_loader_ex(&format_loader)
-        .at_front(true)
-        .done();
-
-    let mut extensions_rust = format_loader.bind().get_recognized_extensions();
-    extensions_rust.push("tres");
-
-    let extensions = loader.get_recognized_extensions_for_type(&FormatLoaderTest::resource_type());
-    assert_eq!(extensions, extensions_rust);
-
-    let resource = loader
-        .load_ex("path.extension")
-        .cache_mode(CacheMode::IGNORE)
-        .done()
-        .unwrap();
-    assert!(resource.try_cast::<BoxMesh>().is_ok());
-
-    loader.remove_resource_format_loader(&format_loader);
-}
-
-#[itest]
 fn test_input_event(test_context: &TestContext) {
     let obj = VirtualInputTest::new_alloc();
     assert_eq!(obj.bind().event, None);
@@ -588,6 +558,8 @@ fn test_notifications() {
     assert_eq!(
         obj.bind().sequence,
         vec![
+            #[cfg(since_api = "4.4")]
+            ReceivedEvent::Notification(NodeNotification::POSTINITIALIZE),
             ReceivedEvent::Notification(NodeNotification::UNPAUSED),
             ReceivedEvent::Notification(NodeNotification::EDITOR_POST_SAVE),
             ReceivedEvent::Ready,
@@ -673,36 +645,23 @@ fn test_revert() {
     assert_eq!(revert.property_get_revert(&changes), true.to_variant());
 }
 
-// Used in `test_collision_object_2d_input_event` in `SpecialTests.gd`.
-#[derive(GodotClass)]
-#[class(init, base = RigidBody2D)]
-pub struct CollisionObject2DTest {
-    input_event_called: bool,
-    viewport: Option<Gd<Viewport>>,
-}
+#[itest]
+fn test_gd_self_virtual_methods() {
+    let mut obj = VirtualGdSelfTest::new_gd();
+    let expected = GString::from("Gd<Self>");
 
-#[godot_api]
-impl IRigidBody2D for CollisionObject2DTest {
-    fn input_event(&mut self, viewport: Gd<Viewport>, _event: Gd<InputEvent>, _shape_idx: i32) {
-        self.input_event_called = true;
-        self.viewport = Some(viewport);
-    }
-}
+    // Test various calling conventions:
+    let ret: GString = obj.call("to_string", &[]).to::<GString>();
+    assert_eq!(ret, expected);
 
-#[godot_api]
-impl CollisionObject2DTest {
-    #[func]
-    fn input_event_called(&self) -> bool {
-        self.input_event_called
-    }
+    let ret: GString = obj.call("get", vslice![""]).to();
+    assert_eq!(ret, expected);
 
-    #[func]
-    fn get_viewport(&self) -> Variant {
-        self.viewport
-            .as_ref()
-            .map(ToGodot::to_variant)
-            .unwrap_or(Variant::nil())
-    }
+    obj.set("a", &4.to_variant());
+    assert_eq!(obj.bind().some_val, 4);
+
+    let ret: GString = obj.property_get_revert("a").to();
+    assert_eq!(ret, expected);
 }
 
 #[derive(GodotClass)]
@@ -779,7 +738,7 @@ impl GetSetTest {
 // There isn't a good way to test editor plugins, but we can at least declare one to ensure that the macro
 // compiles.
 #[derive(GodotClass)]
-#[class(no_init, base = EditorPlugin, tool)]
+#[class(init, base = EditorPlugin, tool)]
 struct CustomEditorPlugin;
 
 // Just override EditorPlugin::edit() to verify method is declared with Option<T>.

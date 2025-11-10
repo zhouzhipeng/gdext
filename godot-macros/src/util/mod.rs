@@ -7,11 +7,12 @@
 
 // Note: some code duplication with godot-codegen crate.
 
-use crate::class::FuncDefinition;
-use crate::ParseResult;
-use proc_macro2::{Delimiter, Group, Ident, Literal, Punct, Spacing, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 use quote::spanned::Spanned;
 use quote::{format_ident, quote, ToTokens, TokenStreamExt};
+
+use crate::class::FuncDefinition;
+use crate::ParseResult;
 
 mod kv_parser;
 mod list_parser;
@@ -30,7 +31,7 @@ pub fn c_str(string: &str) -> Literal {
 
 pub fn class_name_obj(class: &impl ToTokens) -> TokenStream {
     let class = class.to_token_stream();
-    quote! { <#class as ::godot::obj::GodotClass>::class_name() }
+    quote! { <#class as ::godot::obj::GodotClass>::class_id() }
 }
 
 pub fn bail_fn<R, T>(msg: impl AsRef<str>, tokens: T) -> ParseResult<R>
@@ -64,11 +65,15 @@ macro_rules! require_api_version {
     };
 }
 
-pub fn error_fn<T>(msg: impl AsRef<str>, tokens: T) -> venial::Error
-where
-    T: Spanned,
-{
-    venial::Error::new_at_span(tokens.__span(), msg.as_ref())
+/// Returns the span of the given tokens.
+pub fn span_of<T: Spanned>(tokens: &T) -> Span {
+    // Use of private API due to lack of alternative. If this becomes an issue, we'll find another way.
+    tokens.__span()
+}
+
+pub fn error_fn<T: Spanned>(msg: impl AsRef<str>, tokens: T) -> venial::Error {
+    let span = span_of(&tokens);
+    venial::Error::new_at_span(span, msg.as_ref())
 }
 
 macro_rules! error {
@@ -77,9 +82,18 @@ macro_rules! error {
     }
 }
 
-pub(crate) use bail;
-pub(crate) use error;
-pub(crate) use require_api_version;
+pub(crate) use {bail, error, require_api_version};
+
+/// Keeps all attributes except the one specified (e.g. `"itest"`).
+pub fn retain_attributes_except<'a>(
+    attributes: &'a [venial::Attribute],
+    macro_name: &'a str,
+) -> impl Iterator<Item = &'a venial::Attribute> {
+    attributes.iter().filter(move |attr| {
+        attr.get_single_path_segment()
+            .is_none_or(|segment| segment != macro_name)
+    })
+}
 
 pub fn reduce_to_signature(function: &venial::Function) -> venial::Function {
     let mut reduced = function.clone();
@@ -107,13 +121,10 @@ pub fn parse_signature(mut signature: TokenStream) -> venial::Function {
     reduce_to_signature(&function_item)
 }
 
-/// Returns a type expression that can be used as a `VarcallSignatureTuple`.
-pub fn make_signature_tuple_type(
-    ret_type: &TokenStream,
-    param_types: &[venial::TypeExpr],
-) -> TokenStream {
+/// Returns a type expression that can be used as a `ParamTuple`.
+pub fn make_signature_param_type(param_types: &[venial::TypeExpr]) -> TokenStream {
     quote::quote! {
-        (#ret_type, #(#param_types),*)
+        (#(#param_types,)*)
     }
 }
 
@@ -170,10 +181,10 @@ pub(crate) fn validate_impl(
 /// Validates that the declaration is the of the form `impl Trait for SomeType`, where the name of `Trait` begins with `I`.
 ///
 /// Returns `(class_name, trait_path, trait_base_class)`, e.g. `(MyClass, godot::prelude::INode3D, Node3D)`.
-pub(crate) fn validate_trait_impl_virtual<'a>(
-    original_impl: &'a venial::Impl,
+pub(crate) fn validate_trait_impl_virtual(
+    original_impl: &venial::Impl,
     attr: &str,
-) -> ParseResult<(Ident, &'a venial::TypeExpr, Ident)> {
+) -> ParseResult<(Ident, venial::TypeExpr, Ident)> {
     let trait_name = original_impl.trait_ty.as_ref().unwrap(); // unwrap: already checked outside
     let typename = extract_typename(trait_name);
 
@@ -191,7 +202,7 @@ pub(crate) fn validate_trait_impl_virtual<'a>(
     // Validate self
     validate_self(original_impl, attr).map(|class_name| {
         // let trait_name = typename.unwrap(); // unwrap: already checked in 'Validate trait'
-        (class_name, trait_name, base_class)
+        (class_name, trait_name.clone(), base_class)
     })
 }
 
@@ -240,25 +251,46 @@ pub(crate) fn path_ends_with_complex(path: &venial::TypeExpr, expected: &str) ->
     })
 }
 
+pub fn is_cfg_or_cfg_attr(attr: &venial::Attribute) -> bool {
+    let Some(attr_name) = attr.get_single_path_segment() else {
+        return false;
+    };
+
+    // #[cfg(condition)]
+    if attr_name == "cfg" {
+        return true;
+    }
+
+    // #[cfg_attr(condition, attributes...)]. Multiple attributes can be seperated by comma.
+    if attr_name == "cfg_attr" && attr.value.to_token_stream().to_string().contains("cfg(") {
+        return true;
+    }
+
+    false
+}
+
+/// Returns group representing properly spanned tuple (e.g. `(arg1, arg2, arg3)`).
+///
+/// Use it to preserve span in case if tuple in question is empty (will create properly spanned `()` in such a case).
+pub fn to_spanned_tuple(items: &[impl ToTokens], span: Span) -> Group {
+    let mut group = Group::new(Delimiter::Parenthesis, quote! { #(#items,)* });
+    group.set_span(span);
+
+    group
+}
+
 pub(crate) fn extract_cfg_attrs(
     attrs: &[venial::Attribute],
 ) -> impl IntoIterator<Item = &venial::Attribute> {
+    attrs.iter().filter(|attr| is_cfg_or_cfg_attr(attr))
+}
+
+pub(crate) fn extract_doc_attrs(
+    attrs: &[venial::Attribute],
+) -> impl IntoIterator<Item = &venial::Attribute> {
     attrs.iter().filter(|attr| {
-        let Some(attr_name) = attr.get_single_path_segment() else {
-            return false;
-        };
-
-        // #[cfg(condition)]
-        if attr_name == "cfg" {
-            return true;
-        }
-
-        // #[cfg_attr(condition, attributes...)]. Multiple attributes can be seperated by comma.
-        if attr_name == "cfg_attr" && attr.value.to_token_stream().to_string().contains("cfg(") {
-            return true;
-        }
-
-        false
+        attr.get_single_path_segment()
+            .is_some_and(|attr_name| attr_name == "doc")
     })
 }
 
@@ -406,4 +438,19 @@ pub fn format_funcs_collection_constant(_class_name: &Ident, func_name: &Ident) 
 /// Returns the name of the struct used as collection for all function name constants.
 pub fn format_funcs_collection_struct(class_name: &Ident) -> Ident {
     format_ident!("__godot_{class_name}_Funcs")
+}
+
+/// Returns the name of the macro used to communicate the `struct` (class) visibility to other symbols.
+pub fn format_class_visibility_macro(class_name: &Ident) -> Ident {
+    format_ident!("__godot_{class_name}_vis_macro")
+}
+
+/// Returns the name of the macro used to communicate whether the `struct` (class) contains a base field.
+pub fn format_class_base_field_macro(class_name: &Ident) -> Ident {
+    format_ident!("__godot_{class_name}_has_base_field_macro")
+}
+
+/// Returns the name of the macro used to deny manual `init()` for incompatible init strategies.
+pub fn format_class_deny_manual_init_macro(class_name: &Ident) -> Ident {
+    format_ident!("__deny_manual_init_{class_name}")
 }

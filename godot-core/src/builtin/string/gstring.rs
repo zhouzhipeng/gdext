@@ -11,9 +11,9 @@ use std::fmt::Write;
 
 use godot_ffi as sys;
 use sys::types::OpaqueString;
-use sys::{ffi_methods, interface_fn, GodotFfi};
+use sys::{ffi_methods, interface_fn, ExtVariantType, GodotFfi};
 
-use crate::builtin::string::Encoding;
+use crate::builtin::string::{pad_if_needed, Encoding};
 use crate::builtin::{inner, NodePath, StringName, Variant};
 use crate::meta::error::StringError;
 use crate::meta::AsArg;
@@ -72,6 +72,9 @@ pub struct GString {
     _opaque: OpaqueString,
 }
 
+// SAFETY: The Godot implementation of String uses an atomic copy on write pointer, making this thread-safe as we never write to it unless we own it.
+unsafe impl Send for GString {}
+
 impl GString {
     /// Construct a new empty `GString`.
     pub fn new() -> Self {
@@ -84,7 +87,7 @@ impl GString {
     ///
     /// Some notes on the encodings:
     /// - **Latin-1:** Since every byte is a valid Latin-1 character, no validation besides the `NUL` byte is performed.
-    ///   It is your responsibility to ensure that the input is valid Latin-1.
+    ///   It is your responsibility to ensure that the input is meaningful under Latin-1.
     /// - **ASCII**: Subset of Latin-1, which is additionally validated to be valid, non-`NUL` ASCII characters.
     /// - **UTF-8**: The input is validated to be UTF-8.
     ///
@@ -153,7 +156,11 @@ impl GString {
         self.as_inner().length().try_into().unwrap()
     }
 
-    /// Returns a 32-bit integer hash value representing the string.
+    crate::declare_hash_u32_method! {
+        /// Returns a 32-bit integer hash value representing the string.
+    }
+
+    #[deprecated = "renamed to `hash_u32`"]
     pub fn hash(&self) -> u32 {
         self.as_inner()
             .hash()
@@ -163,7 +170,7 @@ impl GString {
 
     /// Gets the UTF-32 character slice from a `GString`.
     pub fn chars(&self) -> &[char] {
-        // SAFETY: Godot 4.1 ensures valid UTF-32, making interpreting as char slice safe.
+        // SAFETY: Since 4.1, Godot ensures valid UTF-32, making interpreting as char slice safe.
         // See https://github.com/godotengine/godot/pull/74760.
         unsafe {
             let s = self.string_sys();
@@ -257,7 +264,7 @@ impl GString {
     }
 
     #[doc(hidden)]
-    pub fn as_inner(&self) -> inner::InnerString {
+    pub fn as_inner(&self) -> inner::InnerString<'_> {
         inner::InnerString::from_outer(self)
     }
 }
@@ -272,14 +279,12 @@ impl GString {
 //   incremented as that is the callee's responsibility. Which we do by calling
 //   `std::mem::forget(string.clone())`.
 unsafe impl GodotFfi for GString {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::STRING
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::STRING);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-meta::impl_godot_as_self!(GString);
+meta::impl_godot_as_self!(GString: ByRef);
 
 impl_builtin_traits! {
     for GString {
@@ -300,11 +305,13 @@ impl_shared_string_api! {
 
 impl fmt::Display for GString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for ch in self.chars() {
-            f.write_char(*ch)?;
-        }
+        pad_if_needed(f, |f| {
+            for ch in self.chars() {
+                f.write_char(*ch)?;
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -325,7 +332,11 @@ impl From<&str> for GString {
 
         unsafe {
             Self::new_with_string_uninit(|string_ptr| {
+                #[cfg(before_api = "4.3")]
                 let ctor = interface_fn!(string_new_with_utf8_chars_and_len);
+                #[cfg(since_api = "4.3")]
+                let ctor = interface_fn!(string_new_with_utf8_chars_and_len2);
+
                 ctor(
                     string_ptr,
                     bytes.as_ptr() as *const std::ffi::c_char,
@@ -349,12 +360,6 @@ impl From<&[char]> for GString {
                 );
             })
         }
-    }
-}
-
-impl From<String> for GString {
-    fn from(value: String) -> Self {
-        value.as_str().into()
     }
 }
 
@@ -417,15 +422,6 @@ impl From<&StringName> for GString {
     }
 }
 
-impl From<StringName> for GString {
-    /// Converts this `StringName` to a `GString`.
-    ///
-    /// This is identical to `GString::from(&string_name)`, and as such there is no performance benefit.
-    fn from(string_name: StringName) -> Self {
-        Self::from(&string_name)
-    }
-}
-
 impl From<&NodePath> for GString {
     fn from(path: &NodePath) -> Self {
         unsafe {
@@ -438,21 +434,14 @@ impl From<&NodePath> for GString {
     }
 }
 
-impl From<NodePath> for GString {
-    /// Converts this `NodePath` to a `GString`.
-    ///
-    /// This is identical to `GString::from(&path)`, and as such there is no performance benefit.
-    fn from(path: NodePath) -> Self {
-        Self::from(&path)
-    }
-}
-
 #[cfg(feature = "serde")]
 mod serialize {
-    use super::*;
+    use std::fmt::Formatter;
+
     use serde::de::{Error, Visitor};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::fmt::Formatter;
+
+    use super::*;
 
     // For "Available on crate feature `serde`" in docs. Cannot be inherited from module. Also does not support #[derive] (e.g. in Vector2).
     #[cfg_attr(published_docs, doc(cfg(feature = "serde")))]

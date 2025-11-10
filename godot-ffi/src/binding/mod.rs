@@ -6,9 +6,9 @@
  */
 
 use crate::{
-    BuiltinLifecycleTable, BuiltinMethodTable, ClassEditorMethodTable, ClassSceneMethodTable,
-    ClassServersMethodTable, GDExtensionClassLibraryPtr, GDExtensionInterface,
-    GdextRuntimeMetadata, ManualInitCell, UtilityFunctionTable,
+    BuiltinLifecycleTable, BuiltinMethodTable, ClassCoreMethodTable, ClassEditorMethodTable,
+    ClassSceneMethodTable, ClassServersMethodTable, GDExtensionClassLibraryPtr,
+    GDExtensionInterface, GdextRuntimeMetadata, ManualInitCell, UtilityFunctionTable,
 };
 
 #[cfg(feature = "experimental-threads")]
@@ -18,11 +18,12 @@ mod single_threaded;
 
 #[cfg(feature = "experimental-threads")]
 use multi_threaded::BindingStorage;
-#[cfg(not(feature = "experimental-threads"))]
-use single_threaded::BindingStorage;
-
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Public re-exports
 #[cfg(feature = "experimental-threads")]
 pub use multi_threaded::GdextConfig;
+#[cfg(not(feature = "experimental-threads"))]
+use single_threaded::BindingStorage;
 #[cfg(not(feature = "experimental-threads"))]
 pub use single_threaded::GdextConfig;
 
@@ -33,6 +34,7 @@ pub(crate) struct GodotBinding {
     interface: GDExtensionInterface,
     library: ClassLibraryPtr,
     global_method_table: BuiltinLifecycleTable,
+    class_core_method_table: ManualInitCell<ClassCoreMethodTable>,
     class_server_method_table: ManualInitCell<ClassServersMethodTable>,
     class_scene_method_table: ManualInitCell<ClassSceneMethodTable>,
     class_editor_method_table: ManualInitCell<ClassEditorMethodTable>,
@@ -55,6 +57,7 @@ impl GodotBinding {
             interface,
             library: ClassLibraryPtr(library),
             global_method_table,
+            class_core_method_table: ManualInitCell::new(),
             class_server_method_table: ManualInitCell::new(),
             class_scene_method_table: ManualInitCell::new(),
             class_editor_method_table: ManualInitCell::new(),
@@ -83,10 +86,10 @@ unsafe impl Send for ClassLibraryPtr {}
 
 /// # Safety
 /// The table must not have been initialized yet.
-unsafe fn initialize_table<T>(table: &ManualInitCell<T>, value: T, what: &str) {
-    debug_assert!(
+unsafe fn initialize_table<T>(table: &ManualInitCell<T>, value: T, _what: &str) {
+    crate::strict_assert!(
         !table.is_initialized(),
-        "method table for {what} should only be initialized once"
+        "method table for {_what} should only be initialized once"
     );
 
     table.set(value)
@@ -94,8 +97,8 @@ unsafe fn initialize_table<T>(table: &ManualInitCell<T>, value: T, what: &str) {
 
 /// # Safety
 /// The table must have been initialized.
-unsafe fn get_table<T>(table: &'static ManualInitCell<T>, msg: &str) -> &'static T {
-    debug_assert!(table.is_initialized(), "{msg}");
+unsafe fn get_table<T>(table: &'static ManualInitCell<T>, _msg: &str) -> &'static T {
+    crate::strict_assert!(table.is_initialized(), "{_msg}");
 
     table.get_unchecked()
 }
@@ -144,6 +147,20 @@ pub unsafe fn class_servers_api() -> &'static ClassServersMethodTable {
     get_table(
         &get_binding().class_server_method_table,
         "cannot fetch classes; init level 'Servers' not yet loaded",
+    )
+}
+
+/// # Safety
+///
+/// - The Godot binding must have been initialized before calling this function.
+/// - The class core method table must have been initialized before calling this function.
+///
+/// If "experimental-threads" is not enabled, then this must be called from the same thread that the bindings were initialized from.
+#[inline(always)]
+pub unsafe fn class_core_api() -> &'static ClassCoreMethodTable {
+    get_table(
+        &get_binding().class_core_method_table,
+        "cannot fetch classes; init level 'Core' not yet loaded",
     )
 }
 
@@ -248,6 +265,20 @@ pub(crate) unsafe fn deinitialize_binding() {
 #[inline(always)]
 pub(crate) unsafe fn get_binding() -> &'static GodotBinding {
     BindingStorage::get_binding_unchecked()
+}
+
+/// # Safety
+///
+/// - The Godot binding must have been initialized before calling this function.
+/// - Must only be called once.
+///
+/// If "experimental-threads" is not enabled, then this must be called from the same thread that the bindings were initialized from.
+pub(crate) unsafe fn initialize_class_core_method_table(table: ClassCoreMethodTable) {
+    initialize_table(
+        &get_binding().class_core_method_table,
+        table,
+        "classes (Core level)",
+    )
 }
 
 /// # Safety

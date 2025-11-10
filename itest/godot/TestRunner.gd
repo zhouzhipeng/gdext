@@ -9,11 +9,11 @@ extends Node
 class_name GDScriptTestRunner
 
 func _ready():
-	# Check that tests are invoked from the command line. Loading the editor may break some parts (e.g. generated test code).
-	# Both checks are needed (it's possible to invoke `godot -e --headless`).
-	if Engine.is_editor_hint() || DisplayServer.get_name() != 'headless':
-		push_error("Integration tests must be run in headless mode (without editor).")
-		get_tree().quit(2)
+	# Don't run tests when opened in the editor.
+	if Engine.is_editor_hint():
+		if DisplayServer.get_name() == 'headless':
+			push_error("Opening itest in editor in headless mode is not supported.")
+			get_tree().quit(2)
 		return
 
 	# Ensure physics is initialized, for tests that require it.
@@ -87,11 +87,11 @@ func _ready():
 
 
 class GDScriptTestCase:
-	var suite: Object
+	var suite: RefCounted # not always TestSuite, e.g. InheritTests.
 	var method_name: String
 	var suite_name: String
 	
-	func _init(suite: Object, method_name: String):
+	func _init(suite: RefCounted, method_name: String):
 		self.suite = suite
 		self.method_name = method_name
 		self.suite_name = _suite_name(suite)
@@ -100,7 +100,7 @@ class GDScriptTestCase:
 		push_error("run unimplemented")
 		return false
 	
-	static func _suite_name(suite: Object) -> String:
+	static func _suite_name(suite: RefCounted) -> String:
 		var script: GDScript = suite.get_script()
 		return str(script.resource_path.get_file().get_basename(), ".gd")
 
@@ -108,9 +108,9 @@ class GDScriptTestCase:
 class GDScriptExecutableTestCase extends GDScriptTestCase:
 	func run():
 		# This is a no-op if the suite doesn't have this property.
-		suite.set("_assertion_failed", false)
+		suite.reset_state()
 		var result = suite.call(method_name)
-		var ok: bool = (result == true or result == null) and not suite.get("_assertion_failed")
+		var ok: bool = (result == true or result == null) and not suite.is_test_failed()
 		return ok
 
 # Hardcoded test case used for special cases where the standard testing API is not sufficient.

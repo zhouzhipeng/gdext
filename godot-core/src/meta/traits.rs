@@ -5,19 +5,23 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use godot_ffi as sys;
+
+use crate::builtin;
 use crate::builtin::{Variant, VariantType};
 use crate::global::PropertyUsageFlags;
 use crate::meta::error::ConvertError;
 use crate::meta::{
-    sealed, ClassName, FromGodot, GodotConvert, PropertyHintInfo, PropertyInfo, ToGodot,
+    sealed, ClassId, FromGodot, GodotConvert, PropertyHintInfo, PropertyInfo, ToGodot,
 };
 use crate::registry::method::MethodParamOrReturnInfo;
-use godot_ffi as sys;
+use crate::registry::property::builtin_type_string;
 
 // Re-export sys traits in this module, so all are in one place.
-use crate::registry::property::builtin_type_string;
-use crate::{builtin, meta};
-pub use sys::{GodotFfi, GodotNullableFfi};
+#[rustfmt::skip] // Do not reorder.
+pub use sys::{ExtVariantType, GodotFfi, GodotNullableFfi};
+
+pub use crate::builtin::meta_reexport::PackedArrayElement;
 
 /// Conversion of [`GodotFfi`] types to/from [`Variant`].
 #[doc(hidden)]
@@ -36,10 +40,10 @@ pub trait GodotFfiVariant: Sized + GodotFfi {
 //
 // Unlike `GodotFfi`, types implementing this trait don't need to fully represent its corresponding Godot
 // type. For instance [`i32`] does not implement `GodotFfi` because it cannot represent all values of
-// Godot's `int` type, however it does implement `GodotType` because we can set the metadata of values with
+// Godot's `int` type, however it does implement `GodotType` because we can set the meta-data of values with
 // this type to indicate that they are 32 bits large.
 pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
-// 'static is not technically required, but it simplifies a few things (limits e.g. ObjectArg).
+// 'static is not technically required, but it simplifies a few things (limits e.g. `ObjectArg`).
 {
     // Value type for this type's FFI representation.
     #[doc(hidden)]
@@ -81,16 +85,16 @@ pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
     }
 
     #[doc(hidden)]
-    fn class_name() -> ClassName {
-        // If we use `ClassName::of::<()>()` then this type shows up as `(no base)` in documentation.
-        ClassName::none()
+    fn class_id() -> ClassId {
+        // If we use `ClassId::of::<()>`, then this type shows up as `(no base)` in documentation.
+        ClassId::none()
     }
 
     #[doc(hidden)]
     fn property_info(property_name: &str) -> PropertyInfo {
         PropertyInfo {
-            variant_type: Self::Ffi::variant_type(),
-            class_name: Self::class_name(),
+            variant_type: Self::Ffi::VARIANT_TYPE.variant_as_nil(),
+            class_id: Self::class_id(),
             property_name: builtin::StringName::from(property_name),
             hint_info: Self::property_hint_info(),
             usage: PropertyUsageFlags::DEFAULT,
@@ -118,6 +122,12 @@ pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
         ))
     }
 
+    /// Returns a string representation of the Godot type name, as it is used in several property hint contexts.
+    ///
+    /// Examples:
+    /// - `MyClass` for objects
+    /// - `StringName`, `AABB` or `int` for built-ins
+    /// - `Array` for arrays
     #[doc(hidden)]
     fn godot_type_name() -> String;
 
@@ -125,10 +135,26 @@ pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
     ///
     /// Returning false only means that this is not a special case, not that it cannot be `None`. Regular checks are expected to run afterward.
     ///
-    /// This exists only for varcalls and serves a similar purpose as `GodotNullableFfi::is_null()` (although that handles general cases).
+    /// This exists only for var-calls and serves a similar purpose as `GodotNullableFfi::is_null()` (although that handles general cases).
     #[doc(hidden)]
     fn qualifies_as_special_none(_from_variant: &Variant) -> bool {
         false
+    }
+
+    /// Convert to `ObjectArg` for efficient object argument passing.
+    ///
+    /// Implemented in `GodotType` because Rust has no specialization, and there's no good way to have trait bounds in `ByObject`, but not in
+    /// other arg-passing strategies `ByValue`/`ByRef`.
+    ///
+    /// # Panics
+    /// If `Self` is not an object type (`Gd<T>`, `Option<Gd<T>>`). Note that `DynGd<T>` isn't directly implemented here, but uses `Gd<T>`'s
+    /// impl on the FFI layer.
+    #[doc(hidden)]
+    fn as_object_arg(&self) -> crate::meta::ObjectArg<'_> {
+        panic!(
+            "as_object_arg() called for non-object type: {}",
+            std::any::type_name::<Self>()
+        )
     }
 }
 
@@ -157,15 +183,18 @@ pub trait GodotType: GodotConvert<Via = Self> + sealed::Sealed + Sized + 'static
 ///
 /// Also, keep in mind that Godot uses `Variant` for each element. If performance matters and you have small element types such as `u8`,
 /// consider using packed arrays (e.g. `PackedByteArray`) instead.
+//
 #[diagnostic::on_unimplemented(
     message = "`Array<T>` can only store element types supported in Godot arrays (no nesting).",
     label = "has invalid element type"
 )]
-pub trait ArrayElement: ToGodot + FromGodot + sealed::Sealed + meta::ParamType {
-    // Note: several indirections in ArrayElement and the global `element_*` functions go through `GodotConvert::Via`,
-    // to not require Self: GodotType. What matters is how array elements map to Godot on the FFI level (GodotType trait).
+pub trait ArrayElement: ToGodot + FromGodot + sealed::Sealed + 'static {
+    // Note: several indirections in `ArrayElement` and the global `element_*` functions go through `GodotConvert::Via`,
+    // to not require Self: `GodotType`. What matters is how array elements map to Godot on the FFI level (`GodotType` trait).
 
-    /// Returns the representation of this type as a type string.
+    /// Returns the representation of this type as a type string, e.g. `"4:"` for string, or `"24:34/MyClass"` for objects.
+    ///
+    /// (`4` and `24` are variant type ords; `34` is `PropertyHint::NODE_TYPE` ord).
     ///
     /// Used for elements in arrays (the latter despite `ArrayElement` not having a direct relation).
     ///
@@ -184,11 +213,18 @@ pub trait ArrayElement: ToGodot + FromGodot + sealed::Sealed + meta::ParamType {
     }
 }
 
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 // Non-polymorphic helper functions, to avoid constant `<T::Via as GodotType>::` in the code.
 
 #[doc(hidden)]
-pub(crate) fn element_variant_type<T: ArrayElement>() -> VariantType {
-    <T::Via as GodotType>::Ffi::variant_type()
+pub(crate) const fn element_variant_type<T: ArrayElement>() -> VariantType {
+    <T::Via as GodotType>::Ffi::VARIANT_TYPE.variant_as_nil()
+}
+
+/// Classifies `T` into one of Godot's builtin types. **Important:** variants are mapped to `NIL`.
+#[doc(hidden)]
+pub(crate) const fn ffi_variant_type<T: GodotConvert>() -> ExtVariantType {
+    <T::Via as GodotType>::Ffi::VARIANT_TYPE
 }
 
 #[doc(hidden)]
@@ -200,29 +236,3 @@ pub(crate) fn element_godot_type_name<T: ArrayElement>() -> String {
 // pub(crate)  fn element_godot_type_name<T: ArrayElement>() -> String {
 //     <T::Via as GodotType>::godot_type_name()
 // }
-
-/// Marker trait to identify types that can be stored in `Packed*Array` types.
-#[diagnostic::on_unimplemented(
-    message = "`Packed*Array` can only store element types supported in Godot packed arrays.",
-    label = "has invalid element type"
-)]
-pub trait PackedArrayElement: GodotType + sealed::Sealed {
-    /// See [`ArrayElement::element_type_string()`].
-    #[doc(hidden)]
-    fn element_type_string() -> String {
-        builtin_type_string::<Self>()
-    }
-}
-
-// Implement all packed array element types.
-impl PackedArrayElement for u8 {}
-impl PackedArrayElement for i32 {}
-impl PackedArrayElement for i64 {}
-impl PackedArrayElement for f32 {}
-impl PackedArrayElement for f64 {}
-impl PackedArrayElement for builtin::Vector2 {}
-impl PackedArrayElement for builtin::Vector3 {}
-#[cfg(since_api = "4.3")]
-impl PackedArrayElement for builtin::Vector4 {}
-impl PackedArrayElement for builtin::Color {}
-impl PackedArrayElement for builtin::GString {}

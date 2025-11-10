@@ -9,10 +9,13 @@
 //!
 //! See also models/domain/enums.rs for other enum-related methods.
 
-use crate::models::domain::{Enum, Enumerator, EnumeratorValue, RustTy};
-use crate::special_cases;
+use std::collections::HashSet;
+
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
+
+use crate::models::domain::{Enum, Enumerator, EnumeratorValue, RustTy};
+use crate::special_cases;
 
 pub fn make_enums(enums: &[Enum], cfg_attributes: &TokenStream) -> TokenStream {
     let definitions = enums.iter().map(make_enum_definition);
@@ -97,10 +100,13 @@ pub fn make_enum_definition_with(
     };
 
     let traits = define_traits.then(|| {
-        // Trait implementations
-        let engine_trait_impl = make_enum_engine_trait_impl(enum_);
+        // Check for associated bitmasks (e.g. Key -> KeyModifierMask).
+        let enum_bitmask = special_cases::as_enum_bitmaskable(enum_);
+
+        // Trait implementations.
+        let engine_trait_impl = make_enum_engine_trait_impl(enum_, enum_bitmask.as_ref());
         let index_enum_impl = make_enum_index_impl(enum_);
-        let bitwise_impls = make_enum_bitwise_operators(enum_);
+        let bitwise_impls = make_enum_bitwise_operators(enum_, enum_bitmask.as_ref());
 
         quote! {
             #engine_trait_impl
@@ -112,9 +118,9 @@ pub fn make_enum_definition_with(
             }
 
             impl crate::meta::ToGodot for #name {
-                type ToVia<'v> = #ord_type;
+                type Pass = crate::meta::ByValue;
 
-                fn to_godot(&self) -> Self::ToVia<'_> {
+                fn to_godot(&self) -> Self::Via {
                     <Self as #engine_trait>::ord(*self)
                 }
             }
@@ -138,7 +144,7 @@ pub fn make_enum_definition_with(
 ///
 /// Returns `None` if `enum_` isn't an indexable enum.
 fn make_enum_index_impl(enum_: &Enum) -> Option<TokenStream> {
-    let enum_max = enum_.find_index_enum_max()?;
+    let enum_max = enum_.max_index?; // Do nothing if enum isn't sequential with a MAX constant.
     let name = &enum_.name;
 
     Some(quote! {
@@ -216,11 +222,15 @@ fn make_enum_debug_impl(enum_: &Enum, use_as_str: bool) -> TokenStream {
 /// Creates an implementation of the engine trait for the given enum.
 ///
 /// This will implement the trait returned by [`Enum::engine_trait`].
-fn make_enum_engine_trait_impl(enum_: &Enum) -> TokenStream {
+fn make_enum_engine_trait_impl(enum_: &Enum, enum_bitmask: Option<&RustTy>) -> TokenStream {
     let name = &enum_.name;
     let engine_trait = enum_.engine_trait();
 
     if enum_.is_bitfield {
+        // Bitfields: u64, assume any combination is valid.
+
+        let constants_function = make_all_constants_function(enum_);
+
         quote! {
             // We may want to add this in the future.
             //
@@ -236,9 +246,13 @@ fn make_enum_engine_trait_impl(enum_: &Enum) -> TokenStream {
                 fn ord(self) -> u64 {
                     self.ord
                 }
+
+                #constants_function
             }
         }
     } else if enum_.is_exhaustive {
+        // Exhaustive enums: Rust representation is C-style `enum` (not `const`), no fallback enumerator.
+
         let enumerators = enum_.enumerators.iter().map(|enumerator| {
             let Enumerator {
                 name,
@@ -254,7 +268,8 @@ fn make_enum_engine_trait_impl(enum_: &Enum) -> TokenStream {
             }
         });
 
-        let str_functions = make_enum_str_functions(enum_);
+        let str_functions = make_enum_as_str(enum_);
+        let values_and_constants_functions = make_enum_values_and_constants_functions(enum_);
 
         quote! {
             impl #engine_trait for #name {
@@ -270,19 +285,41 @@ fn make_enum_engine_trait_impl(enum_: &Enum) -> TokenStream {
                 }
 
                 #str_functions
+                #values_and_constants_functions
             }
         }
     } else {
+        // Non-exhaustive enums divide into two categories:
+        // - Those with associated mask (e.g. Key -> KeyModifierMask)
+        // - All others
+        // Both have a Rust representation of `struct { ord: i32 }`, with their values as `const` declarations.
+        // However, those with masks don't have strict validation when marshalling from integers, and a Debug repr which includes the mask.
+
         let unique_ords = enum_.unique_ords().expect("self is an enum");
-        let str_functions = make_enum_str_functions(enum_);
+        let str_functions = make_enum_as_str(enum_);
+        let values_and_constants_functions = make_enum_values_and_constants_functions(enum_);
+
+        // We can technically check against all possible mask values, remove each mask, and then verify it's a valid base-enum value.
+        // However, this is not forward compatible: if a new mask is added in a future API version, it wouldn't be removed, and the
+        // "unmasked" (all *known* masks removed) value would not match an enumerator. Thus, assume the value is valid, even if at lower
+        // type safety.
+        let try_from_ord_code = if let Some(_mask) = enum_bitmask {
+            quote! {
+                Some(Self { ord })
+            }
+        } else {
+            quote! {
+                match ord {
+                    #( ord @ #unique_ords )|* => Some(Self { ord }),
+                    _ => None,
+                }
+            }
+        };
 
         quote! {
             impl #engine_trait for #name {
                 fn try_from_ord(ord: i32) -> Option<Self> {
-                    match ord {
-                        #( ord @ #unique_ords )|* => Some(Self { ord }),
-                        _ => None,
-                    }
+                    #try_from_ord_code
                 }
 
                 fn ord(self) -> i32 {
@@ -290,53 +327,73 @@ fn make_enum_engine_trait_impl(enum_: &Enum) -> TokenStream {
                 }
 
                 #str_functions
+                #values_and_constants_functions
             }
         }
     }
 }
 
-/// Creates the `as_str` and `godot_name` implementations for the enum.
-fn make_enum_str_functions(enum_: &Enum) -> TokenStream {
-    let as_str_enumerators = make_enum_to_str_cases(enum_);
+/// Creates both the `values()` and `all_constants()` implementations for the enum.
+fn make_enum_values_and_constants_functions(enum_: &Enum) -> TokenStream {
+    let name = &enum_.name;
 
-    // Only enumerations with different godot names are specified.
-    // `as_str` is called for the rest of them.
-    let godot_different_cases = {
-        let enumerators = enum_
-            .enumerators
-            .iter()
-            .filter(|enumerator| enumerator.name != enumerator.godot_name)
-            .map(|enumerator| {
-                let Enumerator {
-                    name, godot_name, ..
-                } = enumerator;
-                let godot_name_str = godot_name.to_string();
-                quote! {
-                    Self::#name => #godot_name_str,
-                }
-            });
+    let mut distinct_values = Vec::new();
+    let mut seen_ordinals = HashSet::new();
 
-        quote! {
-            #( #enumerators )*
+    for (index, enumerator) in enum_.enumerators.iter().enumerate() {
+        let constant = &enumerator.name;
+        let ordinal = &enumerator.value;
+
+        // values() contains value only if distinct (first time seen) and not MAX.
+        if enum_.max_index != Some(index) && seen_ordinals.insert(ordinal.clone()) {
+            distinct_values.push(quote! { #name::#constant });
+        }
+    }
+
+    let values_function = quote! {
+        fn values() -> &'static [Self] {
+            &[
+                #( #distinct_values ),*
+            ]
         }
     };
 
-    let godot_name_match = if godot_different_cases.is_empty() {
-        // If empty, all the Rust names match the Godot ones.
-        // Remove match statement to avoid `clippy::match_single_binding`.
+    let all_constants_function = make_all_constants_function(enum_);
+
+    quote! {
+        #values_function
+        #all_constants_function
+    }
+}
+
+/// Creates a shared `all_constants()` implementation for enums and bitfields.
+fn make_all_constants_function(enum_: &Enum) -> TokenStream {
+    let name = &enum_.name;
+
+    let all_constants = enum_.enumerators.iter().map(|enumerator| {
+        let ident = &enumerator.name;
+        let rust_name = enumerator.name.to_string();
+        let godot_name = enumerator.godot_name.to_string();
+
         quote! {
-            self.as_str()
+            crate::meta::inspect::EnumConstant::new(#rust_name, #godot_name, #name::#ident)
         }
-    } else {
-        quote! {
-            // Many enums have duplicates, thus allow unreachable.
-            #[allow(unreachable_patterns)]
-            match *self {
-                #godot_different_cases
-                _ => self.as_str(),
+    });
+
+    quote! {
+        fn all_constants() -> &'static [crate::meta::inspect::EnumConstant<#name>] {
+            const {
+                &[
+                    #( #all_constants ),*
+                ]
             }
         }
-    };
+    }
+}
+
+/// Creates the `as_str()` implementation for the enum.
+fn make_enum_as_str(enum_: &Enum) -> TokenStream {
+    let as_str_enumerators = make_enum_to_str_cases(enum_);
 
     quote! {
         #[inline]
@@ -348,17 +405,13 @@ fn make_enum_str_functions(enum_: &Enum) -> TokenStream {
                 _ => "",
             }
         }
-
-        fn godot_name(&self) -> &'static str {
-            #godot_name_match
-        }
     }
 }
 
 /// Creates implementations for bitwise operators for the given enum.
 ///
 /// Currently, this is just [`BitOr`](std::ops::BitOr) for bitfields but that could be expanded in the future.
-fn make_enum_bitwise_operators(enum_: &Enum) -> TokenStream {
+fn make_enum_bitwise_operators(enum_: &Enum, enum_bitmask: Option<&RustTy>) -> TokenStream {
     let name = &enum_.name;
 
     if enum_.is_bitfield {
@@ -372,8 +425,15 @@ fn make_enum_bitwise_operators(enum_: &Enum) -> TokenStream {
                     Self { ord: self.ord | rhs.ord }
                 }
             }
+
+            impl std::ops::BitOrAssign for #name {
+                #[inline]
+                fn bitor_assign(&mut self, rhs: Self) {
+                    *self = *self | rhs;
+                }
+            }
         }
-    } else if let Some(mask_enum) = special_cases::as_enum_bitmaskable(enum_) {
+    } else if let Some(mask_enum) = enum_bitmask {
         // Enum that has an accompanying bitfield for masking.
         let RustTy::EngineEnum { tokens: mask, .. } = mask_enum else {
             panic!("as_enum_bitmaskable() must return enum/bitfield type")

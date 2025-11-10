@@ -50,6 +50,7 @@ pub(crate) mod gen {
 
 pub mod conv;
 
+mod assertions;
 mod extras;
 mod global;
 mod godot_ffi;
@@ -63,99 +64,85 @@ mod toolbox;
 
 #[doc(hidden)]
 #[cfg(target_family = "wasm")]
-pub use gensym::gensym;
+pub use godot_macros::wasm_declare_init_fn;
 
-pub use crate::godot_ffi::{GodotFfi, GodotNullableFfi, PrimitiveConversionError, PtrcallType};
-
-// Method tables
-pub use gen::table_builtins::*;
-pub use gen::table_builtins_lifecycle::*;
-pub use gen::table_editor_classes::*;
-pub use gen::table_scene_classes::*;
-pub use gen::table_servers_classes::*;
-pub use gen::table_utilities::*;
-#[cfg(since_api = "4.4")]
-pub use gen::virtual_hashes as known_virtual_hashes;
+// No-op otherwise.
+#[doc(hidden)]
+#[cfg(not(target_family = "wasm"))]
+#[macro_export]
+macro_rules! wasm_declare_init_fn {
+    () => {};
+}
 
 // Other
 pub use extras::*;
 pub use gen::central::*;
 pub use gen::gdextension_interface::*;
 pub use gen::interface::*;
+// Method tables
+pub use gen::table_builtins::*;
+pub use gen::table_builtins_lifecycle::*;
+pub use gen::table_core_classes::*;
+pub use gen::table_editor_classes::*;
+pub use gen::table_scene_classes::*;
+pub use gen::table_servers_classes::*;
+pub use gen::table_utilities::*;
 pub use global::*;
+pub use init_level::*;
 pub use string_cache::StringCache;
 pub use toolbox::*;
+
+pub use crate::godot_ffi::{
+    ExtVariantType, GodotFfi, GodotNullableFfi, PrimitiveConversionError, PtrcallType,
+};
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // API to access Godot via FFI
 
 mod binding;
+mod init_level;
 
 pub use binding::*;
-
 use binding::{
-    initialize_binding, initialize_builtin_method_table, initialize_class_editor_method_table,
-    initialize_class_scene_method_table, initialize_class_server_method_table, runtime_metadata,
+    initialize_binding, initialize_builtin_method_table, initialize_class_core_method_table,
+    initialize_class_editor_method_table, initialize_class_scene_method_table,
+    initialize_class_server_method_table, runtime_metadata,
 };
 
 #[cfg(not(wasm_nothreads))]
 static MAIN_THREAD_ID: ManualInitCell<std::thread::ThreadId> = ManualInitCell::new();
 
-/// Stage of the Godot initialization process.
-///
-/// Godot's initialization and deinitialization processes are split into multiple stages, like a stack. At each level,
-/// a different amount of engine functionality is available. Deinitialization happens in reverse order.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum InitLevel {
-    /// First level loaded by Godot. Builtin types are available, classes are not.
-    Core,
-
-    /// Second level loaded by Godot. Only server classes and builtins are available.
-    Servers,
-
-    /// Third level loaded by Godot. Most classes are available.
-    Scene,
-
-    /// Fourth level loaded by Godot, only in the editor. All classes are available.
-    Editor,
-}
-
-impl InitLevel {
-    #[doc(hidden)]
-    pub fn from_sys(level: crate::GDExtensionInitializationLevel) -> Self {
-        match level {
-            crate::GDEXTENSION_INITIALIZATION_CORE => Self::Core,
-            crate::GDEXTENSION_INITIALIZATION_SERVERS => Self::Servers,
-            crate::GDEXTENSION_INITIALIZATION_SCENE => Self::Scene,
-            crate::GDEXTENSION_INITIALIZATION_EDITOR => Self::Editor,
-            _ => {
-                eprintln!("WARNING: unknown initialization level {level}");
-                Self::Scene
-            }
-        }
-    }
-    #[doc(hidden)]
-    pub fn to_sys(self) -> crate::GDExtensionInitializationLevel {
-        match self {
-            Self::Core => crate::GDEXTENSION_INITIALIZATION_CORE,
-            Self::Servers => crate::GDEXTENSION_INITIALIZATION_SERVERS,
-            Self::Scene => crate::GDEXTENSION_INITIALIZATION_SCENE,
-            Self::Editor => crate::GDEXTENSION_INITIALIZATION_EDITOR,
-        }
-    }
-}
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 
 pub struct GdextRuntimeMetadata {
-    godot_version: GDExtensionGodotVersion,
+    version_string: String,
+    version_triple: (u8, u8, u8),
 }
 
 impl GdextRuntimeMetadata {
-    /// # Safety
-    ///
-    /// - The `string` field of `godot_version` must not be written to while this struct exists.
-    /// - The `string` field of `godot_version` must be safe to read from while this struct exists.
-    pub unsafe fn new(godot_version: GDExtensionGodotVersion) -> Self {
-        Self { godot_version }
+    pub fn load(sys_version: GDExtensionGodotVersion) -> Self {
+        // SAFETY: GDExtensionGodotVersion always contains valid string.
+        let version_string = unsafe { read_version_string(sys_version.string) };
+
+        let version_triple = (
+            sys_version.major as u8,
+            sys_version.minor as u8,
+            sys_version.patch as u8,
+        );
+
+        Self {
+            version_string,
+            version_triple,
+        }
+    }
+
+    // TODO(v0.5): CowStr, also in GdextBuild.
+    pub fn version_string(&self) -> &str {
+        &self.version_string
+    }
+
+    pub fn version_triple(&self) -> (u8, u8, u8) {
+        self.version_triple
     }
 }
 
@@ -177,10 +164,10 @@ pub unsafe fn initialize(
     library: GDExtensionClassLibraryPtr,
     config: GdextConfig,
 ) {
-    out!("Initialize gdext...");
+    out!("Initialize godot-rust...");
 
     out!(
-        "Godot version against which gdext was compiled: {}",
+        "Godot version against which godot-rust was compiled: {}",
         GdextBuild::godot_static_version_string()
     );
 
@@ -214,8 +201,7 @@ pub unsafe fn initialize(
         unsafe { UtilityFunctionTable::load(&interface, &mut string_names) };
     out!("Loaded utility function table.");
 
-    // SAFETY: We do not touch `version` again after passing it to `new` here.
-    let runtime_metadata = unsafe { GdextRuntimeMetadata::new(version) };
+    let runtime_metadata = GdextRuntimeMetadata::load(version);
 
     let builtin_method_table = {
         #[cfg(feature = "codegen-lazy-fptrs")]
@@ -275,14 +261,34 @@ pub unsafe fn initialize(
 /// # Safety
 /// See [`initialize`].
 pub unsafe fn deinitialize() {
-    deinitialize_binding()
+    deinitialize_binding();
+
+    // MACOS-PARTIAL-RELOAD: Clear the main thread ID to allow re-initialization during hot reload.
+    #[cfg(not(wasm_nothreads))]
+    {
+        if MAIN_THREAD_ID.is_initialized() {
+            MAIN_THREAD_ID.clear();
+        }
+    }
+}
+
+fn safeguards_level_string() -> &'static str {
+    if cfg!(safeguards_strict) {
+        "strict"
+    } else if cfg!(safeguards_balanced) {
+        "balanced"
+    } else {
+        "disengaged"
+    }
 }
 
 fn print_preamble(version: GDExtensionGodotVersion) {
-    let api_version: &'static str = GdextBuild::godot_static_version_string();
-    let runtime_version = read_version_string(&version);
+    // SAFETY: GDExtensionGodotVersion always contains valid string.
+    let runtime_version = unsafe { read_version_string(version.string) };
 
-    println!("Initialize godot-rust (API {api_version}, runtime {runtime_version})");
+    let api_version: &'static str = GdextBuild::godot_static_version_string();
+    let safeguards_level = safeguards_level_string();
+    println!("Initialize godot-rust (API {api_version}, runtime {runtime_version}, safeguards {safeguards_level})");
 }
 
 /// # Safety
@@ -306,9 +312,18 @@ pub unsafe fn load_class_method_table(api_level: InitLevel) {
     let (class_count, method_count);
     match api_level {
         InitLevel::Core => {
-            // Currently we don't need to do anything in `Core`, this may change in the future.
-            class_count = 0;
-            method_count = 0;
+            // SAFETY: The interface has been initialized and this function hasn't been called before.
+            unsafe {
+                #[cfg(feature = "codegen-lazy-fptrs")]
+                initialize_class_core_method_table(ClassCoreMethodTable::load());
+                #[cfg(not(feature = "codegen-lazy-fptrs"))]
+                initialize_class_core_method_table(ClassCoreMethodTable::load(
+                    interface,
+                    &mut string_names,
+                ));
+            }
+            class_count = ClassCoreMethodTable::CLASS_COUNT;
+            method_count = ClassCoreMethodTable::METHOD_COUNT;
         }
         InitLevel::Servers => {
             // SAFETY: The interface has been initialized and this function hasn't been called before.
@@ -379,7 +394,7 @@ pub unsafe fn godot_has_feature(
     // Issue a raw C call to OS.has_feature(tag_string).
 
     // SAFETY: Called from main thread, interface has been initialized, and the scene api has been initialized.
-    let method_bind = unsafe { class_scene_api() }.os__has_feature();
+    let method_bind = unsafe { class_core_api() }.os__has_feature();
 
     // SAFETY: Called from main thread, and interface has been initialized.
     let interface = unsafe { get_interface() };
@@ -426,9 +441,58 @@ pub fn main_thread_id() -> std::thread::ThreadId {
 ///
 /// # Panics
 /// - If it is called before the engine bindings have been initialized.
-#[cfg(not(wasm_nothreads))]
 pub fn is_main_thread() -> bool {
-    std::thread::current().id() == main_thread_id()
+    #[cfg(not(wasm_nothreads))]
+    {
+        std::thread::current().id() == main_thread_id()
+    }
+
+    #[cfg(wasm_nothreads)]
+    {
+        true
+    }
+}
+
+/// Assign the current thread id to be the main thread.
+///
+/// This is required for platforms on which Godot runs the main loop on a different thread than the thread the library was loaded on.
+/// Android is one such platform.
+///
+/// # Safety
+///
+/// - must only be called after [`initialize`] has been called.
+pub unsafe fn discover_main_thread() {
+    #[cfg(not(wasm_nothreads))]
+    {
+        if is_main_thread() {
+            // we don't have to do anything if the current thread is already the main thread.
+            return;
+        }
+
+        let thread_id = std::thread::current().id();
+
+        // SAFETY: initialize must have already been called before this function is called. By clearing and setting the cell again we can reinitialize it.
+        unsafe {
+            MAIN_THREAD_ID.clear();
+            MAIN_THREAD_ID.set(thread_id);
+        }
+    }
+}
+
+/// Construct Godot object.
+///
+/// "NOTIFICATION_POSTINITIALIZE" must be sent after construction since 4.4.
+///
+/// # Safety
+/// `class_name` is assumed to be valid.
+pub unsafe fn classdb_construct_object(
+    class_name: GDExtensionConstStringNamePtr,
+) -> GDExtensionObjectPtr {
+    #[cfg(before_api = "4.4")]
+    return interface_fn!(classdb_construct_object)(class_name);
+
+    #[cfg(since_api = "4.4")]
+    return interface_fn!(classdb_construct_object2)(class_name);
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------

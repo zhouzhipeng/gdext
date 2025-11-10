@@ -5,16 +5,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use godot_ffi as sys;
-use sys::{ffi_methods, GodotFfi};
-
-use crate::builtin::inner::InnerProjection;
-use crate::builtin::math::{ApproxEq, GlamConv, GlamType};
-use crate::builtin::{real, Plane, RMat4, RealConv, Transform3D, Vector2, Vector4, Vector4Axis};
-
 use std::ops::Mul;
 
+use godot_ffi as sys;
+use sys::{ffi_methods, ExtVariantType, GodotFfi};
+
 use super::{Aabb, Rect2, Vector3};
+use crate::builtin::math::{ApproxEq, GlamConv, GlamType};
+use crate::builtin::{
+    inner, real, Plane, RMat4, RealConv, Transform3D, Vector2, Vector4, Vector4Axis,
+};
 
 /// A 4x4 matrix used for 3D projective transformations.
 ///
@@ -470,8 +470,8 @@ impl Projection {
     }
 
     #[doc(hidden)]
-    pub(crate) fn as_inner(&self) -> InnerProjection {
-        InnerProjection::from_outer(self)
+    pub(crate) fn as_inner(&self) -> inner::InnerProjection<'_> {
+        inner::InnerProjection::from_outer(self)
     }
 }
 
@@ -557,14 +557,12 @@ impl GlamConv for Projection {
 
 // SAFETY: This type is represented as `Self` in Godot, so `*mut Self` is sound.
 unsafe impl GodotFfi for Projection {
-    fn variant_type() -> sys::VariantType {
-        sys::VariantType::PROJECTION
-    }
+    const VARIANT_TYPE: ExtVariantType = ExtVariantType::Concrete(sys::VariantType::PROJECTION);
 
     ffi_methods! { type sys::GDExtensionTypePtr = *mut Self; .. }
 }
 
-crate::meta::impl_godot_as_self!(Projection);
+crate::meta::impl_godot_as_self!(Projection: ByValue);
 
 /// A projection's clipping plane.
 ///
@@ -596,7 +594,7 @@ impl ProjectionPlane {
 }
 
 /// The eye to create a projection for, when creating a projection adjusted for head-mounted displays.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[repr(C)]
 pub enum ProjectionEye {
     LEFT = 1,
@@ -670,9 +668,8 @@ mod test {
 
     #![allow(clippy::type_complexity, clippy::excessive_precision)]
 
-    use crate::assert_eq_approx;
-
     use super::*;
+    use crate::assert_eq_approx;
 
     const EPSILON: real = 1e-6;
 

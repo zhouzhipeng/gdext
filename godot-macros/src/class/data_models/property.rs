@@ -7,10 +7,13 @@
 
 //! Parses the `#[var]` and `#[export]` attributes on fields.
 
-use crate::class::{Field, FieldVar, Fields, GetSet, GetterSetterImpl, UsageFlags};
-use crate::util::{format_funcs_collection_constant, format_funcs_collection_struct};
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
+
+use crate::class::data_models::fields::Fields;
+use crate::class::data_models::group_export::FieldGroup;
+use crate::class::{Field, FieldVar, GetSet, GetterSetterImpl, UsageFlags};
+use crate::util::{format_funcs_collection_constant, format_funcs_collection_struct, ident};
 
 #[derive(Default, Clone, Debug)]
 pub enum FieldHint {
@@ -39,6 +42,7 @@ impl FieldHint {
 
 pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
     let mut getter_setter_impls = Vec::new();
+    let mut phantom_var_dummy_uses = Vec::new();
     let mut func_name_consts = Vec::new();
     let mut export_tokens = Vec::new();
 
@@ -48,32 +52,40 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
             ty: field_type,
             var,
             export,
+            group,
+            subgroup,
             ..
         } = field;
 
         // Ensure we add a var if the user only provided a `#[export]`.
         let var = match (export, var) {
-            (Some(_), None) => Some(FieldVar {
-                usage_flags: UsageFlags::InferredExport,
-                ..Default::default()
-            }),
+            (Some(export), None) => {
+                let usage_flags = if let Some(usage) = export.to_export_usage() {
+                    UsageFlags::Custom(vec![usage])
+                } else {
+                    UsageFlags::InferredExport
+                };
+                FieldVar {
+                    usage_flags,
+                    ..Default::default()
+                }
+            }
 
-            (_, var) => var.clone(),
+            (_, Some(var)) => var.clone(),
+            _ => continue,
         };
 
-        let Some(var) = var else {
-            continue;
-        };
-
-        let field_name = field_ident.to_string();
-
+        make_groups_registrations(group, subgroup, &mut export_tokens, class_name);
         let FieldVar {
+            rename,
             getter,
             setter,
             hint,
             mut usage_flags,
             ..
         } = var;
+
+        let field_name = rename.as_ref().unwrap_or(field_ident).to_string();
 
         let export_hint;
         let registration_fn;
@@ -139,22 +151,31 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
         // Note: {getter,setter}_tokens can be either a path `Class_Functions::constant_name` or an empty string `""`.
 
         let getter_tokens = make_getter_setter(
-            getter.to_impl(class_name, GetSet::Get, field),
+            getter.to_impl(class_name, GetSet::Get, field, &rename),
             &mut getter_setter_impls,
             &mut func_name_consts,
             &mut export_tokens,
             class_name,
         );
         let setter_tokens = make_getter_setter(
-            setter.to_impl(class_name, GetSet::Set, field),
+            setter.to_impl(class_name, GetSet::Set, field, &rename),
             &mut getter_setter_impls,
             &mut func_name_consts,
             &mut export_tokens,
             class_name,
         );
 
+        if field.is_phantomvar {
+            let field_name = field.name.clone();
+            phantom_var_dummy_uses.push(quote! {
+                let _ = &self.#field_name;
+            });
+        }
+
         export_tokens.push(quote! {
-            ::godot::register::private::#registration_fn::<#class_name, #field_type>(
+            // This type may be reused in #hint, in case of generic functions.
+            type FieldType = #field_type;
+            ::godot::register::private::#registration_fn::<#class_name, FieldType>(
                 #field_name,
                 #getter_tokens,
                 #setter_tokens,
@@ -164,6 +185,21 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
         });
     }
 
+    let phantom_var_dummy_use_fn = if phantom_var_dummy_uses.is_empty() {
+        quote! {}
+    } else {
+        // `PhantomVar` fields are not normally accessed, resulting in undesired dead-code warnings.
+        // We are in a derive macro, so we cannot alter the original struct definition to add `#[allow(dead_code)]` to the field.
+        // Instead, we generate an unused, hidden function that mentions the field.
+        quote! {
+            #[expect(dead_code)]
+            #[doc(hidden)]
+            fn __phantom_var_dummy_uses(&self) {
+                #(#phantom_var_dummy_uses)*
+            }
+        }
+    };
+
     // For each generated #[func], add a const declaration.
     // This is the name of the container struct, which is declared by #[derive(GodotClass)].
     let class_functions_name = format_funcs_collection_struct(class_name);
@@ -171,6 +207,7 @@ pub fn make_property_impl(class_name: &Ident, fields: &Fields) -> TokenStream {
     quote! {
         impl #class_name {
             #(#getter_setter_impls)*
+            #phantom_var_dummy_use_fn
         }
 
         impl #class_functions_name {
@@ -210,4 +247,42 @@ fn make_getter_setter(
     let constant = format_funcs_collection_constant(class_name, &gs.function_name);
 
     quote! { #funcs_collection::#constant }
+}
+
+/// Generates registrations for declared group and subgroup and pushes them to export tokens.
+///
+/// Groups must be registered before subgroups (otherwise the ordering is broken).
+fn make_groups_registrations(
+    group: &Option<FieldGroup>,
+    subgroup: &Option<FieldGroup>,
+    export_tokens: &mut Vec<TokenStream>,
+    class_name: &Ident,
+) {
+    export_tokens.push(make_group_registration(
+        group,
+        ident("register_group"),
+        class_name,
+    ));
+    export_tokens.push(make_group_registration(
+        subgroup,
+        ident("register_subgroup"),
+        class_name,
+    ));
+}
+
+fn make_group_registration(
+    group: &Option<FieldGroup>,
+    register_fn: Ident,
+    class_name: &Ident,
+) -> TokenStream {
+    let Some(FieldGroup { name, prefix }) = group else {
+        return TokenStream::new();
+    };
+
+    quote! {
+    ::godot::register::private::#register_fn::<#class_name>(
+            #name,
+            #prefix
+    );
+    }
 }

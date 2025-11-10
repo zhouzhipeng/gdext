@@ -5,10 +5,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::meta::error::{ConvertError, FromGodotError};
-use crate::meta::{FromGodot, GodotConvert, ToGodot};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::num::NonZeroU64;
+
+use crate::meta::error::{ConvertError, FromGodotError};
+use crate::meta::{FromGodot, GodotConvert, ToGodot};
 
 /// Represents a non-zero instance ID.
 ///
@@ -68,7 +69,7 @@ impl InstanceId {
     /// This corresponds to Godot's global function `is_instance_id_valid()`.
     #[doc(alias = "is_instance_id_valid")]
     pub fn lookup_validity(self) -> bool {
-        crate::gen::utilities::is_instance_id_valid(self.to_i64())
+        crate::global::is_instance_id_valid(self.to_i64())
     }
 
     // Private: see rationale above
@@ -96,9 +97,9 @@ impl GodotConvert for InstanceId {
 }
 
 impl ToGodot for InstanceId {
-    type ToVia<'v> = i64;
+    type Pass = crate::meta::ByValue;
 
-    fn to_godot(&self) -> Self::ToVia<'_> {
+    fn to_godot(&self) -> Self::Via {
         self.to_i64()
     }
 }

@@ -13,11 +13,11 @@ use godot::classes::{
     ScriptLanguageExtension,
 };
 use godot::global::{Error, MethodFlags};
-use godot::meta::{ClassName, FromGodot, MethodInfo, PropertyInfo, ToGodot};
+use godot::meta::error::CallErrorType;
+use godot::meta::{ClassId, FromGodot, MethodInfo, PropertyInfo, ToGodot};
 use godot::obj::script::{create_script_instance, ScriptInstance, SiMut};
 use godot::obj::{Base, Gd, NewAlloc, WithBaseField};
 use godot::register::{godot_api, GodotClass};
-use godot::sys;
 
 use crate::framework::itest;
 
@@ -37,12 +37,11 @@ impl TestScript {
 #[rustfmt::skip]
 #[godot_api]
 impl IScriptExtension for TestScript {
-    
     fn can_instantiate(&self) -> bool {
         true
     }
 
-    unsafe fn instance_create(&self, for_object: Gd<Object>) -> *mut c_void {
+    unsafe fn instance_create_rawptr(&self, for_object: Gd<Object>) -> *mut c_void {
         create_script_instance(TestScriptInstance::new(self.to_gd().upcast()), for_object)
     }
 
@@ -55,7 +54,7 @@ impl IScriptExtension for TestScript {
     fn get_global_name(&self) -> StringName { unreachable!() }
     fn inherits_script(&self, _script: Gd<Script>) -> bool { unreachable!() }
     fn get_instance_base_type(&self) -> StringName { unreachable!() }
-    unsafe fn placeholder_instance_create(&self, _for_object: Gd<Object>) -> *mut c_void { unreachable!() }
+    unsafe fn placeholder_instance_create_rawptr(&self, _for_object: Gd<Object>) -> *mut c_void { unreachable!() }
     fn instance_has(&self, _object: Gd<Object>) -> bool { unreachable!() }
     fn has_source_code(&self) -> bool { unreachable!() }
     fn get_source_code(&self) -> GString { unreachable!() }
@@ -63,7 +62,6 @@ impl IScriptExtension for TestScript {
     fn reload(&mut self, _keep_state: bool) -> Error { unreachable!() }
     fn get_documentation(&self) -> Array<Dictionary> { unreachable!() }
     fn has_method(&self, _method: StringName) -> bool { unreachable!() }
-    #[cfg(since_api = "4.2")]
     fn has_static_method(&self, _method: StringName) -> bool { unreachable!() }
     fn get_method_info(&self, _method: StringName) -> Dictionary { unreachable!() }
     fn is_tool(&self) -> bool { unreachable!() }
@@ -76,8 +74,8 @@ impl IScriptExtension for TestScript {
     fn get_script_method_list(&self) -> Array<Dictionary> { unreachable!() }
     fn get_script_property_list(&self) -> Array<Dictionary> { unreachable!() }
     fn get_member_line(&self, _member: StringName) -> i32 { unreachable!() }
-    fn get_constants(&self) -> godot::prelude::Dictionary { unreachable!() }
-    fn get_members(&self) -> godot::prelude::Array<StringName> { unreachable!() }
+    fn get_constants(&self) -> Dictionary { unreachable!() }
+    fn get_members(&self) -> Array<StringName> { unreachable!() }
     fn is_placeholder_fallback_enabled(&self) -> bool { unreachable!() }
     fn get_rpc_config(&self) -> Variant { unreachable!() }
     
@@ -109,7 +107,7 @@ impl TestScriptInstance {
             method_list: vec![MethodInfo {
                 id: 1,
                 method_name: StringName::from("script_method_a"),
-                class_name: ClassName::new_cached::<TestScript>(|| "TestScript".to_string()),
+                class_name: ClassId::new_cached::<TestScript>(|| "TestScript".to_string()),
                 return_type: PropertyInfo::new_var::<GString>(""),
                 arguments: vec![
                     PropertyInfo::new_var::<GString>("arg_a"),
@@ -168,7 +166,7 @@ impl ScriptInstance for TestScriptInstance {
         mut this: SiMut<Self>,
         method: StringName,
         args: &[&Variant],
-    ) -> Result<Variant, sys::GDExtensionCallErrorType> {
+    ) -> Result<Variant, CallErrorType> {
         match method.to_string().as_str() {
             "script_method_a" => {
                 let arg_a = args[0].to::<GString>();
@@ -190,7 +188,10 @@ impl ScriptInstance for TestScriptInstance {
                 Ok(result)
             }
 
-            _ => Err(sys::GDEXTENSION_CALL_ERROR_INVALID_METHOD),
+            other => {
+                println!("CALL: {other} with args: {args:?}");
+                Err(CallErrorType::InvalidMethod)
+            }
         }
     }
 
@@ -302,7 +303,7 @@ impl IScriptLanguageExtension for TestScriptLanguage {
     fn debug_get_stack_level_function(&self, _level: i32) -> GString { unreachable!() }
     fn debug_get_stack_level_locals(&mut self, _level: i32, _max_subitems: i32, _max_depth: i32) -> Dictionary { unreachable!() }
     fn debug_get_stack_level_members(&mut self, _level: i32, _max_subitems: i32, _max_depth: i32) -> Dictionary { unreachable!() }
-    unsafe fn debug_get_stack_level_instance(&mut self, _level: i32) -> *mut c_void { unreachable!() }
+    unsafe fn debug_get_stack_level_instance_rawptr(&mut self, _level: i32) -> *mut c_void { unreachable!() }
     fn debug_get_globals(&mut self, _max_subitems: i32,_max_depthh: i32) -> Dictionary { unreachable!() }
     fn debug_parse_stack_level_expression(&mut self, _level: i32, _expression: GString, _max_subitems: i32, _max_depth: i32) -> GString { unreachable!() }
     fn debug_get_current_stack_info(&mut self) -> Array<Dictionary> { unreachable!() }
@@ -314,8 +315,8 @@ impl IScriptLanguageExtension for TestScriptLanguage {
     fn get_public_annotations(&self) -> Array<Dictionary> { unreachable!() }
     fn profiling_start(&mut self) { unreachable!() }
     fn profiling_stop(&mut self) { unreachable!() }
-    unsafe fn profiling_get_accumulated_data(&mut self, _info_array: *mut godot::classes::native::ScriptLanguageExtensionProfilingInfo, _info_max: i32) -> i32 { unreachable!() }
-    unsafe fn profiling_get_frame_data(&mut self, _info_array: *mut godot::classes::native::ScriptLanguageExtensionProfilingInfo, _info_max: i32) -> i32 { unreachable!() }
+    unsafe fn profiling_get_accumulated_data_rawptr(&mut self, _info_array: *mut godot::classes::native::ScriptLanguageExtensionProfilingInfo, _info_max: i32) -> i32 { unreachable!() }
+    unsafe fn profiling_get_frame_data_rawptr(&mut self, _info_array: *mut godot::classes::native::ScriptLanguageExtensionProfilingInfo, _info_max: i32) -> i32 { unreachable!() }
     fn frame(&mut self) { unreachable!() }
     fn handles_global_class_type(&self, _type_: GString) -> bool { unreachable!() }
     fn get_global_class_name(&self, _path: GString) -> Dictionary { unreachable!() }
@@ -336,18 +337,17 @@ impl IScriptLanguageExtension for TestScriptLanguage {
 
 // Test that [`script_instance_exists`] returns true if a instance of a script exists for the given object.
 #[itest]
-#[cfg(since_api = "4.2")]
 fn script_instance_exists() {
     let language = TestScriptLanguage::new_alloc();
     let script = TestScript::new(language.clone());
     let mut object = Object::new_alloc();
 
-    object.set_script(&script.to_variant());
+    object.set_script(&script);
 
     let instance_exists = godot::obj::script::script_instance_exists(&object, &script);
     assert!(instance_exists);
 
-    object.set_script(&Variant::nil());
+    object.set_script(Gd::null_arg());
 
     let instance_exists = godot::obj::script::script_instance_exists(&object, &script);
     assert!(!instance_exists);

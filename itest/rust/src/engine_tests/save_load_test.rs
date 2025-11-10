@@ -5,7 +5,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use godot::obj::NewGd;
+use godot::classes;
+use godot::classes::notify::NodeNotification;
+use godot::obj::{Base, Gd, NewAlloc, NewGd, OnReady};
 use godot::register::GodotClass;
 use godot::tools::{load, save, try_load, try_save};
 
@@ -25,12 +27,23 @@ struct SavedGame {
     level: u32,
 }
 
+// Needed to test OnReady integration of load.
+#[derive(GodotClass)]
+#[class(base=Node, init)]
+struct GameLoader {
+    // Test also more complex expressions.
+    #[init(load = &format!("res://{RESOURCE_NAME}"))]
+    game: OnReady<Gd<SavedGame>>,
+
+    _base: Base<classes::Node>,
+}
+
 const RESOURCE_NAME: &str = "test_resource.tres";
 const FAULTY_PATH: &str = "no_such_path";
 
 #[itest]
 fn save_test() {
-    let res_path = format!("res://{}", RESOURCE_NAME);
+    let res_path = format!("res://{RESOURCE_NAME}");
 
     let resource = SavedGame::new_gd();
 
@@ -48,7 +61,7 @@ fn save_test() {
 #[itest]
 fn load_test() {
     let level = 2317;
-    let res_path = format!("res://{}", RESOURCE_NAME);
+    let res_path = format!("res://{RESOURCE_NAME}");
 
     let mut resource = SavedGame::new_gd();
     resource.bind_mut().set_level(level);
@@ -66,6 +79,23 @@ fn load_test() {
 
     let loaded = load::<SavedGame>(&res_path);
     assert_eq!(loaded.bind().get_level(), level);
+
+    remove_test_file(RESOURCE_NAME);
+}
+
+#[itest]
+fn load_with_onready() {
+    let res_path = format!("res://{RESOURCE_NAME}");
+
+    let mut resource = SavedGame::new_gd();
+    resource.bind_mut().set_level(555);
+
+    save(&resource, &res_path);
+
+    let mut loader = GameLoader::new_alloc();
+    loader.notify(NodeNotification::READY);
+    assert_eq!(loader.bind().game.bind().get_level(), 555);
+    loader.free();
 
     remove_test_file(RESOURCE_NAME);
 }

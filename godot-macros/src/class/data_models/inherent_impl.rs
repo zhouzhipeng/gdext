@@ -5,6 +5,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use proc_macro2::{Delimiter, Group, Ident, Span, TokenStream};
+use quote::spanned::Spanned;
+use quote::{format_ident, quote, ToTokens};
+
+use crate::class::data_models::func;
 use crate::class::{
     into_signature_info, make_constant_registration, make_method_registration,
     make_signal_registrations, ConstDefinition, FuncDefinition, RpcAttr, RpcMode, SignalDefinition,
@@ -15,10 +20,6 @@ use crate::util::{
     replace_class_in_path, require_api_version, KvParser,
 };
 use crate::{handle_mutually_exclusive_keys, util, ParseResult};
-
-use proc_macro2::{Delimiter, Group, Ident, TokenStream};
-use quote::spanned::Spanned;
-use quote::{format_ident, quote};
 
 /// Attribute for user-declared function.
 enum ItemAttrType {
@@ -32,18 +33,12 @@ struct ItemAttr {
     ty: ItemAttrType,
 }
 
-impl ItemAttr {
-    fn bail<R>(self, msg: &str, method: &venial::Function) -> ParseResult<R> {
-        bail!(&method.name, "#[{}]: {}", self.attr_name, msg)
-    }
-}
-
 enum AttrParseResult {
     Func(FuncAttr),
     Rpc(RpcAttr),
     FuncRpc(FuncAttr, RpcAttr),
     Signal(SignalAttr, venial::AttributeValue),
-    Const(#[allow(dead_code)] venial::AttributeValue),
+    Constant(#[allow(dead_code)] venial::AttributeValue),
 }
 
 impl AttrParseResult {
@@ -54,7 +49,7 @@ impl AttrParseResult {
             AttrParseResult::Rpc(rpc) => ItemAttrType::Func(FuncAttr::default(), Some(rpc)),
             AttrParseResult::FuncRpc(func, rpc) => ItemAttrType::Func(func, Some(rpc)),
             AttrParseResult::Signal(signal, attr_val) => ItemAttrType::Signal(signal, attr_val),
-            AttrParseResult::Const(constant) => ItemAttrType::Const(constant),
+            AttrParseResult::Constant(constant) => ItemAttrType::Const(constant),
         }
     }
 }
@@ -71,13 +66,16 @@ struct SignalAttr {
     pub no_builder: bool,
 }
 
-// ----------------------------------------------------------------------------------------------------------------------------------------------
-
-pub struct InherentImplAttr {
+pub(crate) struct InherentImplAttr {
     /// For implementation reasons, there can be a single 'primary' impl block and 0 or more 'secondary' impl blocks.
     /// For now, this is controlled by a key in the 'godot_api' attribute.
     pub secondary: bool,
+
+    /// When typed signal generation is explicitly disabled by the user.
+    pub no_typed_signals: bool,
 }
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
 
 /// Codegen for `#[godot_api] impl MyType`
 pub fn transform_inherent_impl(
@@ -93,10 +91,8 @@ pub fn transform_inherent_impl(
     let (funcs, signals) = process_godot_fns(&class_name, &mut impl_block, meta.secondary)?;
     let consts = process_godot_constants(&mut impl_block)?;
 
-    #[cfg(all(feature = "register-docs", since_api = "4.3"))]
-    let docs = crate::docs::document_inherent_impl(&funcs, &consts, &signals);
-    #[cfg(not(all(feature = "register-docs", since_api = "4.3")))]
-    let docs = quote! {};
+    let inherent_impl_docs =
+        crate::docs::make_trait_docs_registration(&funcs, &consts, &signals, &class_name, &prv);
 
     // Container struct holding names of all registered #[func]s.
     // The struct is declared by #[derive(GodotClass)].
@@ -107,8 +103,12 @@ pub fn transform_inherent_impl(
 
     // For each #[func] in this impl block, create one constant.
     let func_name_constants = make_funcs_collection_constants(&funcs, &class_name);
-    let (signal_registrations, signals_collection_struct) =
-        make_signal_registrations(&signals, &class_name, &class_name_obj)?;
+    let (signal_registrations, signal_symbol_types) = make_signal_registrations(
+        &signals,
+        &class_name,
+        &class_name_obj,
+        meta.no_typed_signals,
+    )?;
 
     #[cfg(feature = "codegen-full")]
     let rpc_registrations = crate::class::make_rpc_registrations_fn(&class_name, &funcs);
@@ -125,17 +125,20 @@ pub fn transform_inherent_impl(
     let method_storage_name = format_ident!("__registration_methods_{class_name}");
     let constants_storage_name = format_ident!("__registration_constants_{class_name}");
 
-    let fill_storage = quote! {
-        ::godot::sys::plugin_execute_pre_main!({
-            #method_storage_name.lock().unwrap().push(|| {
-                #( #method_registrations )*
-                #( #signal_registrations )*
-            });
+    let fill_storage = {
+        quote! {
+            ::godot::sys::plugin_execute_pre_main!({
+                #method_storage_name.lock().unwrap().push(|| {
+                    #( #method_registrations )*
+                    #( #signal_registrations )*
+                });
 
-            #constants_storage_name.lock().unwrap().push(|| {
-                #constant_registration
+                #constants_storage_name.lock().unwrap().push(|| {
+                    #constant_registration
+                });
+
             });
-        });
+        }
     };
 
     if !meta.secondary {
@@ -173,7 +176,7 @@ pub fn transform_inherent_impl(
 
         let class_registration = quote! {
             ::godot::sys::plugin_add!(#prv::__GODOT_PLUGIN_REGISTRY; #prv::ClassPlugin::new::<#class_name>(
-                #prv::PluginItem::InherentImpl(#prv::InherentImpl::new::<#class_name>(#docs))
+                #prv::PluginItem::InherentImpl(#prv::InherentImpl::new::<#class_name>())
             ));
         };
 
@@ -186,7 +189,8 @@ pub fn transform_inherent_impl(
             impl #funcs_collection {
                 #( #func_name_constants )*
             }
-            #signals_collection_struct
+            #signal_symbol_types
+            #inherent_impl_docs
         };
 
         Ok(result)
@@ -200,11 +204,29 @@ pub fn transform_inherent_impl(
             impl #funcs_collection {
                 #( #func_name_constants )*
             }
+            #inherent_impl_docs
         };
 
         Ok(result)
     }
 }
+
+/* Re-enable if we allow controlling declarative macros for signals (base_field_macro, visibility_macros).
+fn extract_hint_attribute(impl_block: &mut venial:: Impl) -> ParseResult<GodotApiHints> {
+    // #[hint(has_base_field = BOOL)]
+    let has_base_field;
+    if let Some(mut hints) = KvParser::parse_remove(&mut impl_block.attributes, "hint")? {
+        has_base_field = hints.handle_bool("has_base_field")?;
+    } else {
+        has_base_field = None;
+    }
+
+    // #[hint(class_visibility = pub(crate))]
+    // ...
+
+    Ok(GodotApiHints { has_base_field })
+}
+*/
 
 fn process_godot_fns(
     class_name: &Ident,
@@ -221,7 +243,7 @@ fn process_godot_fns(
             continue;
         };
 
-        let Some(attr) = extract_attributes(function)? else {
+        let Some(attr) = parse_attributes(function)? else {
             continue;
         };
 
@@ -232,47 +254,50 @@ fn process_godot_fns(
             || function.qualifiers.tk_extern.is_some()
             || function.qualifiers.extern_abi.is_some()
         {
-            return attr.bail("fn qualifiers are not allowed", function);
+            return bail!(
+                &function.qualifiers,
+                "#[func]: fn qualifiers are not allowed"
+            );
         }
 
         if function.generic_params.is_some() {
-            return attr.bail("generic fn parameters are not supported", function);
+            return bail!(
+                &function.generic_params,
+                "#[func]: generic fn parameters are not supported"
+            );
         }
 
         match attr.ty {
             ItemAttrType::Func(func, rpc_info) => {
+                if rpc_info.is_some() && is_secondary_impl {
+                    return bail!(
+                        &function,
+                        "#[rpc] is currently not supported in secondary impl blocks",
+                    )?;
+                }
+
                 let external_attributes = function.attributes.clone();
 
-                // Signatures are the same thing without body.
+                // Transforms the following.
+                //   from function:     #[attr] pub fn foo(&self, a: i32) -> i32 { ... }
+                //   into signature:    fn foo(&self, a: i32) -> i32
                 let mut signature = util::reduce_to_signature(function);
                 let gd_self_parameter = if func.has_gd_self {
-                    if signature.params.is_empty() {
-                        return bail_attr(
-                            attr.attr_name,
-                            "with attribute key `gd_self`, the method must have a first parameter of type Gd<Self>",
-                            function
-                        );
-                    } else {
-                        let param = signature.params.inner.remove(0);
-
-                        let venial::FnParam::Typed(param) = param.0 else {
-                            return bail_attr(
-                                attr.attr_name,
-                                "with attribute key `gd_self`, the first parameter must be Gd<Self> (not a `self` receiver)",
-                                function
-                            );
-                        };
-
-                        // Note: parameter is explicitly NOT renamed (maybe_rename_parameter).
-                        Some(param.name)
-                    }
+                    // Removes Gd<Self> receiver from signature for further processing.
+                    let param_name = func::extract_gd_self(&mut signature, &attr.attr_name)?;
+                    Some(param_name)
                 } else {
                     None
                 };
 
                 // Clone might not strictly be necessary, but the 2 other callers of into_signature_info() are better off with pass-by-value.
-                let signature_info =
+                let mut signature_info =
                     into_signature_info(signature.clone(), class_name, gd_self_parameter.is_some());
+
+                // Default value expressions from `#[opt(default = EXPR)]`; None for required parameters.
+                let all_param_maybe_defaults = parse_default_expressions(&mut function.params)?;
+                signature_info.optional_param_default_exprs =
+                    validate_default_exprs(all_param_maybe_defaults, &signature_info.param_idents)?;
 
                 // For virtual methods, rename/mangle existing user method and create a new method with the original name,
                 // which performs a dynamic dispatch.
@@ -302,9 +327,9 @@ fn process_godot_fns(
 
             ItemAttrType::Signal(ref signal, ref _attr_val) => {
                 if is_secondary_impl {
-                    return attr.bail(
-                        "#[signal] is currently not supported in secondary impl blocks",
+                    return bail!(
                         function,
+                        "#[signal] is currently not supported in secondary impl blocks",
                     );
                 }
                 if function.return_ty.is_some() {
@@ -335,9 +360,9 @@ fn process_godot_fns(
             }
 
             ItemAttrType::Const(_) => {
-                return attr.bail(
-                    "#[constant] can only be used on associated constant",
+                return bail!(
                     function,
+                    "#[constant] can only be used on associated constant",
                 )
             }
         }
@@ -366,7 +391,7 @@ fn process_godot_constants(decl: &mut venial::Impl) -> ParseResult<Vec<ConstDefi
             continue;
         };
 
-        if let Some(attr) = extract_attributes(constant)? {
+        if let Some(attr) = parse_attributes(constant)? {
             match attr.ty {
                 ItemAttrType::Func(_, _) => {
                     return bail!(constant, "#[func] and #[rpc] can only be used on functions")
@@ -392,6 +417,11 @@ fn process_godot_constants(decl: &mut venial::Impl) -> ParseResult<Vec<ConstDefi
     Ok(constant_signatures)
 }
 
+/// Replaces the body of `function` with custom code that performs virtual dispatch.
+///
+/// Appends the virtual function to `virtual_functions`.
+///
+/// Returns the Godot-registered name of the virtual function, usually `_<name>` (but overridable with `#[func(rename = ...)]`).
 fn add_virtual_script_call(
     virtual_functions: &mut Vec<venial::Function>,
     function: &mut venial::Function,
@@ -400,7 +430,11 @@ fn add_virtual_script_call(
     rename: &Option<String>,
     gd_self_parameter: Option<Ident>,
 ) -> String {
-    assert!(cfg!(since_api = "4.3"));
+    #[allow(clippy::assertions_on_constants)]
+    {
+        // Without braces, clippy removes the #[allow] for some reason...
+        assert!(cfg!(since_api = "4.3"));
+    }
 
     // Update parameter names, so they can be forwarded (e.g. a "_" declared by the user cannot).
     let is_params = function.params.iter_mut().skip(1); // skip receiver.
@@ -422,7 +456,8 @@ fn add_virtual_script_call(
     };
     let method_name_cstr = c_str(&method_name_str);
 
-    let sig_tuple = signature_info.tuple_type();
+    let call_params = signature_info.params_type();
+    let call_ret = &signature_info.return_type;
     let arg_names = &signature_info.param_idents;
 
     let (object_ptr, receiver);
@@ -436,16 +471,17 @@ fn add_virtual_script_call(
 
     let code = quote! {
         let object_ptr = #object_ptr;
-        let method_sname = ::godot::builtin::StringName::from(#method_name_cstr);
+        let method_sname = ::godot::builtin::StringName::__cstr(#method_name_cstr);
         let method_sname_ptr = method_sname.string_sys();
         let has_virtual_override = unsafe { ::godot::private::has_virtual_script_method(object_ptr, method_sname_ptr) };
 
         if has_virtual_override {
             // Dynamic dispatch.
-            type CallSig = #sig_tuple;
+            type CallParams = #call_params;
+            type CallRet = #call_ret;
             let args = (#( #arg_names, )*);
             unsafe {
-                <CallSig as ::godot::meta::VarcallSignatureTuple>::out_script_virtual_call(
+                ::godot::meta::Signature::<CallParams, CallRet>::out_script_virtual_call(
                     #class_name_str,
                     #method_name_str,
                     method_sname_ptr,
@@ -471,16 +507,25 @@ fn add_virtual_script_call(
     method_name_str
 }
 
-fn extract_attributes<T>(item: &mut T) -> ParseResult<Option<ItemAttr>>
-where
-    for<'a> &'a T: Spanned,
-    T: AttributesMut,
-{
+/// Parses an entire item (`fn`, `const`) inside an `impl` block and returns a domain representation.
+///
+/// See also [`parse_attributes_inner`].
+fn parse_attributes<T: ImplItem>(item: &mut T) -> ParseResult<Option<ItemAttr>> {
+    let span = util::span_of(item);
+    parse_attributes_inner(item.attributes_mut(), span)
+}
+
+/// Non-generic version of [`parse_attributes`].
+///
+/// `attributes` are all `#[...]` attributes of the item, including foreign (non-godot-rust) ones.
+/// `full_item_span` is the span of the entire item (attributes + `fn`/...), for error messages.
+fn parse_attributes_inner(
+    attributes: &mut Vec<venial::Attribute>,
+    full_item_span: Span,
+) -> ParseResult<Option<ItemAttr>> {
     // Option<(attr_name: Ident, attr: ParsedAttr)>
     let mut found = None;
     let mut index = 0;
-
-    let attributes = item.attributes_mut();
 
     while let Some(attr) = attributes.get(index) {
         index += 1;
@@ -491,111 +536,10 @@ where
         };
 
         let parsed_attr = match attr_name {
-            // #[func]
-            name if name == "func" => {
-                // Safe unwrap, since #[func] must be present if we got to this point.
-                let mut parser = KvParser::parse(attributes, "func")?.unwrap();
-
-                // #[func(rename = MyClass)]
-                let rename = parser.handle_expr("rename")?.map(|ts| ts.to_string());
-
-                // #[func(virtual)]
-                let is_virtual = if let Some(span) = parser.handle_alone_with_span("virtual")? {
-                    require_api_version!("4.3", span, "#[func(virtual)]")?;
-                    true
-                } else {
-                    false
-                };
-
-                // #[func(gd_self)]
-                let has_gd_self = parser.handle_alone("gd_self")?;
-
-                parser.finish()?;
-
-                AttrParseResult::Func(FuncAttr {
-                    rename,
-                    is_virtual,
-                    has_gd_self,
-                })
-            }
-
-            // #[rpc]
-            name if name == "rpc" => {
-                // Safe unwrap, since #[rpc] must be present if we got to this point.
-                let mut parser = KvParser::parse(attributes, "rpc")?.unwrap();
-
-                let rpc_mode = handle_mutually_exclusive_keys(
-                    &mut parser,
-                    "#[rpc]",
-                    &["any_peer", "authority"],
-                )?
-                .map(|idx| RpcMode::from_usize(idx).unwrap());
-
-                let transfer_mode = handle_mutually_exclusive_keys(
-                    &mut parser,
-                    "#[rpc]",
-                    &["reliable", "unreliable", "unreliable_ordered"],
-                )?
-                .map(|idx| TransferMode::from_usize(idx).unwrap());
-
-                let call_local = handle_mutually_exclusive_keys(
-                    &mut parser,
-                    "#[rpc]",
-                    &["call_local", "call_remote"],
-                )?
-                .map(|idx| idx == 0);
-
-                let channel = parser.handle_usize("channel")?.map(|x| x as u32);
-
-                let config_expr = parser.handle_expr("config")?;
-
-                parser.finish()?;
-
-                let rpc_attr = match (config_expr, (&rpc_mode, &transfer_mode, &call_local, &channel)) {
-		            // Ok: Only `config = [expr]` is present.
-		            (Some(expr), (None, None, None, None)) => RpcAttr::Expression(expr),
-
-		            // Err: `config = [expr]` is present along other parameters, which is not allowed.
-		            (Some(_), _) => return bail!(
-                        &*item,
-                        "`#[rpc(config = ...)]` is mutually exclusive with any other parameters(`any_peer`, `reliable`, `call_local`, `channel = 0`)"
-                    ),
-
-		            // Ok: `config` is not present, any combination of the other parameters is allowed.
-		            _ => RpcAttr::SeparatedArgs {
-			            rpc_mode,
-			            transfer_mode,
-			            call_local,
-			            channel,
-		            }
-	            };
-
-                AttrParseResult::Rpc(rpc_attr)
-            }
-
-            // #[signal]
-            name if name == "signal" => {
-                // Safe unwrap, since #[signal] must be present if we got to this point.
-                let mut parser = KvParser::parse(attributes, "signal")?.unwrap();
-
-                // Private #[signal(__no_builder)]
-                let no_builder = parser.handle_alone("__no_builder")?;
-
-                parser.finish()?;
-
-                let signal_attr = SignalAttr { no_builder };
-
-                AttrParseResult::Signal(signal_attr, attr.value.clone())
-            }
-
-            // #[constant]
-            name if name == "constant" => {
-                // Ensure no keys are present.
-                let parser = KvParser::parse(attributes, "constant")?.unwrap();
-                parser.finish()?;
-
-                AttrParseResult::Const(attr.value.clone())
-            }
+            name if name == "func" => parse_func_attr(attributes)?,
+            name if name == "rpc" => parse_rpc_attr(attributes)?,
+            name if name == "signal" => parse_signal_attr(attributes, attr)?,
+            name if name == "constant" => parse_constant_attr(attributes, attr)?,
 
             // Ignore unknown attributes.
             _ => continue,
@@ -620,7 +564,7 @@ where
 
             // We found two incompatible attributes.
             (Some((found_name, _)), _) => {
-                return bail!(&*item, "The attributes `{found_name}` and `{attr_name}` cannot be used in the same declaration")?;
+                return bail!(full_item_span, "attributes `{found_name}` and `{attr_name}` cannot be used in the same declaration");
             }
         };
 
@@ -633,21 +577,194 @@ where
     }))
 }
 
-fn bail_attr<R>(attr_name: Ident, msg: &str, method: &venial::Function) -> ParseResult<R> {
-    bail!(&method.name, "#[{}]: {}", attr_name, msg)
+/// `#[func]` attribute.
+fn parse_func_attr(attributes: &[venial::Attribute]) -> ParseResult<AttrParseResult> {
+    // Safe unwrap, since #[func] must be present if we got to this point.
+    let mut parser = KvParser::parse(attributes, "func")?.unwrap();
+
+    // #[func(rename = MyClass)]
+    let rename = parser.handle_expr("rename")?.map(|ts| ts.to_string());
+
+    // #[func(virtual)]
+    let is_virtual = if let Some(span) = parser.handle_alone_with_span("virtual")? {
+        require_api_version!("4.3", span, "#[func(virtual)]")?;
+        true
+    } else {
+        false
+    };
+
+    // #[func(gd_self)]
+    let has_gd_self = parser.handle_alone("gd_self")?;
+
+    parser.finish()?;
+
+    Ok(AttrParseResult::Func(FuncAttr {
+        rename,
+        is_virtual,
+        has_gd_self,
+    }))
 }
 
-trait AttributesMut {
+/// `#[rpc]` attribute.
+fn parse_rpc_attr(attributes: &[venial::Attribute]) -> ParseResult<AttrParseResult> {
+    // Safe unwrap, since #[rpc] must be present if we got to this point.
+    let mut parser = KvParser::parse(attributes, "rpc")?.unwrap();
+
+    let rpc_mode =
+        handle_mutually_exclusive_keys(&mut parser, "#[rpc]", &["any_peer", "authority"])?
+            .map(|idx| RpcMode::from_usize(idx).unwrap());
+
+    let transfer_mode = handle_mutually_exclusive_keys(
+        &mut parser,
+        "#[rpc]",
+        &["reliable", "unreliable", "unreliable_ordered"],
+    )?
+    .map(|idx| TransferMode::from_usize(idx).unwrap());
+
+    let call_local =
+        handle_mutually_exclusive_keys(&mut parser, "#[rpc]", &["call_local", "call_remote"])?
+            .map(|idx| idx == 0);
+
+    let channel = parser.handle_usize("channel")?.map(|x| x as u32);
+
+    let config_expr = parser.handle_expr("config")?;
+
+    let item_span = parser.span();
+    parser.finish()?;
+
+    let rpc_attr = match (config_expr, (&rpc_mode, &transfer_mode, &call_local, &channel)) {
+        // Ok: Only `config = [expr]` is present.
+        (Some(expr), (None, None, None, None)) => RpcAttr::Expression(expr),
+
+        // Err: `config = [expr]` is present along other parameters, which is not allowed.
+        (Some(_), _) => return bail!(
+            item_span,
+            "`#[rpc(config = ...)]` is mutually exclusive with any other parameters(`any_peer`, `reliable`, `call_local`, `channel = 0`)"
+        ),
+
+        // Ok: `config` is not present, any combination of the other parameters is allowed.
+        _ => RpcAttr::SeparatedArgs {
+            rpc_mode,
+            transfer_mode,
+            call_local,
+            channel,
+        }
+    };
+
+    Ok(AttrParseResult::Rpc(rpc_attr))
+}
+
+/// `#[signal]` attribute.
+fn parse_signal_attr(
+    attributes: &[venial::Attribute],
+    attr: &venial::Attribute,
+) -> ParseResult<AttrParseResult> {
+    // Safe unwrap, since #[signal] must be present if we got to this point.
+    let mut parser = KvParser::parse(attributes, "signal")?.unwrap();
+
+    // Private #[signal(__no_builder)]
+    let no_builder = parser.handle_alone("__no_builder")?;
+
+    parser.finish()?;
+
+    let signal_attr = SignalAttr { no_builder };
+
+    Ok(AttrParseResult::Signal(signal_attr, attr.value.clone()))
+}
+
+/// `#[constant]` attribute.
+fn parse_constant_attr(
+    attributes: &[venial::Attribute],
+    attr: &venial::Attribute,
+) -> ParseResult<AttrParseResult> {
+    // Ensure no keys are present.
+    let parser = KvParser::parse(attributes, "constant")?.unwrap();
+    parser.finish()?;
+
+    Ok(AttrParseResult::Constant(attr.value.clone()))
+}
+
+/// Parses `#[opt(default = ...)]` parameter attributes and validates that optional parameters only appear at the end.
+///
+/// Returns a vector of optional default values, one per parameter (skipping receiver).
+fn parse_default_expressions(
+    params: &mut venial::Punctuated<venial::FnParam>,
+) -> ParseResult<Vec<Option<TokenStream>>> {
+    let mut res = vec![];
+
+    for param in params.iter_mut() {
+        let typed_param = match &mut param.0 {
+            venial::FnParam::Receiver(_) => continue,
+            venial::FnParam::Typed(fn_typed_param) => fn_typed_param,
+        };
+
+        let optional_value = match KvParser::parse_remove(&mut typed_param.attributes, "opt")? {
+            None => None,
+            Some(mut parser) => Some(parser.handle_expr_required("default")?),
+        };
+
+        res.push(optional_value);
+    }
+
+    Ok(res)
+}
+
+/// Validates that default parameters only appear at the end of the parameter list.
+/// Consumes the input and returns only the non-None default expressions.
+fn validate_default_exprs(
+    all_param_maybe_defaults: Vec<Option<TokenStream>>,
+    param_idents: &[Ident],
+) -> ParseResult<Vec<TokenStream>> {
+    let mut must_be_default = false;
+    let mut result = Vec::new();
+
+    for (i, param) in all_param_maybe_defaults.into_iter().enumerate() {
+        match (param, must_be_default) {
+            // First optional parameter encountered.
+            (Some(default_expr), false) => {
+                must_be_default = true;
+                result.push(default_expr);
+            }
+
+            // Subsequent optional parameters.
+            (Some(default_expr), true) => {
+                result.push(default_expr);
+            }
+
+            // Required parameter before any optional ones.
+            (None, false) => {}
+
+            // Required parameter after optional ones.
+            (None, true) => {
+                let name = &param_idents[i];
+                return bail!(
+                    name,
+                    "parameter `{name}` must have a default value, because previous parameters are already optional",
+                );
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+
+trait ImplItem
+where
+    Self: ToTokens,
+    for<'a> &'a Self: Spanned,
+{
     fn attributes_mut(&mut self) -> &mut Vec<venial::Attribute>;
 }
 
-impl AttributesMut for venial::Function {
+impl ImplItem for venial::Function {
     fn attributes_mut(&mut self) -> &mut Vec<venial::Attribute> {
         &mut self.attributes
     }
 }
 
-impl AttributesMut for venial::Constant {
+impl ImplItem for venial::Constant {
     fn attributes_mut(&mut self) -> &mut Vec<venial::Attribute> {
         &mut self.attributes
     }

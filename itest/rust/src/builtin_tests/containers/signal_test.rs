@@ -5,16 +5,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::framework::itest;
-use godot::builtin::{GString, Signal, StringName};
-use godot::classes::{Object, RefCounted};
-use godot::meta::ToGodot;
-use godot::obj::{Base, Gd, InstanceId, NewAlloc, NewGd, WithSignals};
-use godot::register::{godot_api, GodotClass};
-use godot::sys;
-use godot::sys::Global;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+use godot::builtin::{vslice, GString, Signal, StringName};
+use godot::classes::object::ConnectFlags;
+use godot::classes::{Node, Node3D, Object, RefCounted};
+use godot::meta::{FromGodot, GodotConvert, ToGodot};
+use godot::obj::{Base, Gd, InstanceId, NewAlloc, NewGd};
+use godot::prelude::ConvertError;
+use godot::register::{godot_api, GodotClass};
+use godot::sys::Global;
+
+use crate::framework::itest;
 
 #[itest]
 fn signal_basic_connect_emit() {
@@ -26,7 +29,7 @@ fn signal_basic_connect_emit() {
     assert_eq!(receiver.bind().last_received(), LastReceived::Unit);
 
     emitter.connect("signal_int", &receiver.callable("receive_int"));
-    emitter.emit_signal("signal_int", &[1278.to_variant()]);
+    emitter.emit_signal("signal_int", vslice![1278]);
     assert_eq!(receiver.bind().last_received(), LastReceived::Int(1278));
 
     let emitter_variant = emitter.to_variant();
@@ -42,7 +45,6 @@ fn signal_basic_connect_emit() {
 }
 
 // "Internal" means connect/emit happens from within the class, via self.signals().
-#[cfg(since_api = "4.2")]
 #[itest]
 fn signal_symbols_internal() {
     let mut emitter = Emitter::new_alloc();
@@ -53,15 +55,18 @@ fn signal_symbols_internal() {
     internal.connect_signals_internal(tracker.clone());
     drop(internal);
 
+    // Make sure that connection has been properly registered by Godot.
+    assert!(!emitter.get_incoming_connections().is_empty());
+
     emitter.bind_mut().emit_signals_internal();
 
     // Check that closure is invoked.
     assert_eq!(tracker.get(), 1234, "Emit failed (closure)");
 
-    // Check that instance method is invoked.
+    // Check that instance methods self_receive() and self_receive_gd_inc1() are invoked.
     assert_eq!(
         emitter.bind().last_received_int,
-        1234,
+        1234 + 1, // self_receive_gd_inc1() increments by 1, and should be called after self_receive().
         "Emit failed (method)"
     );
 
@@ -76,7 +81,6 @@ fn signal_symbols_internal() {
 }
 
 // "External" means connect/emit happens from outside the class, via Gd::signals().
-#[cfg(since_api = "4.2")]
 #[itest]
 fn signal_symbols_external() {
     let emitter = Emitter::new_alloc();
@@ -96,7 +100,7 @@ fn signal_symbols_external() {
 
     // Connect to other object.
     let receiver = Receiver::new_alloc();
-    sig.connect_obj(&receiver, Receiver::receive_int_mut);
+    sig.connect_other(&receiver, Receiver::receive_int_mut);
 
     // Emit signal (now via tuple).
     sig.emit_tuple((987,));
@@ -123,38 +127,69 @@ fn signal_symbols_external() {
 }
 
 // "External" means connect/emit happens from outside the class, via Gd::signals().
-#[cfg(since_api = "4.2")]
+#[itest]
+fn signal_symbols_complex_emit() {
+    let emitter = Emitter::new_alloc();
+    let arg = emitter.clone();
+    let mut sig = emitter.signals().signal_obj();
+
+    let tracker = Rc::new(RefCell::new(None));
+    {
+        let tracker = tracker.clone();
+        sig.connect(move |obj: Gd<Object>, name: GString| {
+            *tracker.borrow_mut() = Some((obj, name));
+        });
+    }
+
+    // Allows upcasting.
+    sig.emit(&arg, "hello");
+
+    emitter.free();
+}
+
+#[itest]
+fn signal_receiver_auto_disconnect() {
+    let emitter = Emitter::new_alloc();
+    let sig = emitter.signals().signal_int();
+
+    let receiver = Receiver::new_alloc();
+    sig.connect_other(&receiver, Receiver::receive_int_mut);
+
+    let outgoing_connections = emitter.get_signal_connection_list("signal_int");
+    let incoming_connections = receiver.get_incoming_connections();
+
+    assert_eq!(incoming_connections.len(), 1);
+    assert_eq!(incoming_connections, outgoing_connections);
+
+    receiver.free();
+
+    // Should be auto-disconnected by Godot.
+    let outgoing_connections = emitter.get_signal_connection_list("signal_int");
+    assert!(outgoing_connections.is_empty());
+    emitter.free();
+}
+
+// "External" means connect/emit happens from outside the class, via Gd::signals().
 #[itest]
 fn signal_symbols_external_builder() {
     let emitter = Emitter::new_alloc();
     let mut sig = emitter.signals().signal_int();
 
     // Self-modifying method.
-    sig.connect_builder()
-        .object_self()
-        .method_mut(Emitter::self_receive)
-        .done();
+    sig.connect_self(Emitter::self_receive);
 
     // Connect to other object.
     let receiver_mut = Receiver::new_alloc();
-    sig.connect_builder()
-        .object(&receiver_mut)
-        .method_mut(Receiver::receive_int_mut)
-        .done();
+    sig.builder()
+        .name("receive_the_knowledge")
+        .connect_other_mut(&receiver_mut, Receiver::receive_int_mut);
 
-    // Connect to yet another object, immutable receiver.
-    let receiver_immut = Receiver::new_alloc();
-    sig.connect_builder()
-        .object(&receiver_immut)
-        .method_immut(Receiver::receive_int)
-        .done();
+    sig.connect_other(&receiver_mut, Receiver::receive_int_mut);
 
     let tracker = Rc::new(Cell::new(0));
     {
         let tracker = tracker.clone();
-        sig.connect_builder()
-            .function(move |i| tracker.set(i))
-            .done();
+        sig.builder().connect(move |i| tracker.set(i));
     }
 
     // Emit signal.
@@ -172,13 +207,6 @@ fn signal_symbols_external_builder() {
 
     // Check that *other* instance method is invoked.
     assert_eq!(
-        receiver_immut.bind().last_received(),
-        LastReceived::Int(552),
-        "Emit failed (other object, immut method)"
-    );
-
-    // Check that *other* instance method is invoked.
-    assert_eq!(
         receiver_mut.bind().last_received(),
         LastReceived::IntMut(552),
         "Emit failed (other object, mut method)"
@@ -187,12 +215,11 @@ fn signal_symbols_external_builder() {
     // Check that closures set up with builder are invoked.
     assert_eq!(tracker.get(), 552, "Emit failed (builder local)");
 
-    receiver_immut.free();
     receiver_mut.free();
     emitter.free();
 }
 
-#[cfg(all(since_api = "4.2", feature = "experimental-threads"))]
+#[cfg(feature = "experimental-threads")]
 #[itest]
 fn signal_symbols_sync() {
     use std::sync::{Arc, Mutex};
@@ -203,10 +230,8 @@ fn signal_symbols_sync() {
     let sync_tracker = Arc::new(Mutex::new(0));
     {
         let sync_tracker = sync_tracker.clone();
-        sig.connect_builder()
-            .function(move |i| *sync_tracker.lock().unwrap() = i)
-            .sync()
-            .done();
+        sig.builder()
+            .connect_sync(move |i| *sync_tracker.lock().unwrap() = i);
     }
 
     sig.emit(1143);
@@ -217,6 +242,230 @@ fn signal_symbols_sync() {
     );
 
     emitter.free();
+}
+
+#[itest]
+fn signal_symbols_engine(ctx: &crate::framework::TestContext) {
+    // Add node to tree, to test Godot signal interactions.
+    let mut node = Node::new_alloc();
+    ctx.scene_tree.clone().add_child(&node);
+
+    // API allows to only modify one signal at a time (borrowing &mut self).
+    let renamed = node.signals().renamed();
+    let renamed_count = Rc::new(Cell::new(0));
+    {
+        let renamed_count = renamed_count.clone();
+        renamed.connect(move || renamed_count.set(renamed_count.get() + 1));
+    }
+
+    let entered = node.signals().child_entered_tree();
+    let entered_tracker = Rc::new(RefCell::new(None));
+    {
+        let entered_tracker = entered_tracker.clone();
+
+        entered.builder().connect(move |node| {
+            *entered_tracker.borrow_mut() = Some(node);
+        });
+    }
+
+    // Apply changes, triggering signals.
+    node.set_name("new name");
+    let child = Node::new_alloc();
+    node.add_child(&child);
+
+    // Verify that signals were emitted.
+    let entered_node = entered_tracker.take();
+    assert_eq!(renamed_count.get(), 1, "Emit failed: Node::renamed");
+    assert_eq!(
+        entered_node,
+        Some(child),
+        "Emit failed: Node::child_entered_tree"
+    );
+
+    // Manually emit a signal a 2nd time.
+    node.signals().renamed().emit();
+    assert_eq!(renamed_count.get(), 2, "Manual emit failed: Node::renamed");
+
+    // Remove from tree for other tests.
+    node.free();
+}
+
+// Test that Node signals are accessible from a derived class.
+#[itest]
+fn signal_symbols_engine_inherited(ctx: &crate::framework::TestContext) {
+    let mut node = Emitter::new_alloc();
+
+    // Add to tree, so signals are propagated.
+    ctx.scene_tree.clone().add_child(&node);
+
+    let sig = node.signals().renamed();
+    sig.connect_self(|this| {
+        this.last_received_int = 887;
+    });
+
+    node.set_name("new name");
+
+    assert_eq!(node.bind().last_received_int, 887);
+
+    // Remove from tree for other tests.
+    node.free();
+}
+
+// Test that Node signals are accessible from a derived class, with Node3D middleman.
+#[itest]
+fn signal_symbols_engine_inherited_indirect(ctx: &crate::framework::TestContext) {
+    let original = Emitter::new_alloc();
+    let mut node = original.clone().upcast::<Node3D>();
+
+    // Add to tree, so signals are propagated.
+    ctx.scene_tree.clone().add_child(&node);
+
+    let sig = node.signals().renamed();
+    sig.connect_other(&original, |this: &mut Emitter| {
+        this.last_received_int = 887;
+    });
+
+    node.set_name("new name");
+
+    assert_eq!(original.bind().last_received_int, 887);
+
+    // Remove from tree for other tests.
+    node.free();
+}
+
+// Test that Node signals are *internally* accessible from a derived class.
+#[itest]
+fn signal_symbols_engine_inherited_internal() {
+    // No tree needed; signal is emitted manually.
+    let mut node = Emitter::new_alloc();
+    node.bind_mut().connect_base_signals_internal();
+    node.bind_mut().emit_base_signals_internal();
+
+    assert_eq!(node.bind().last_received_int, 553);
+    node.free();
+}
+
+// Test that signal API methods accept engine types as receivers.
+#[itest]
+fn signal_symbols_connect_engine() {
+    // No tree needed; signal is emitted manually.
+    let node = Emitter::new_alloc();
+    let mut engine = Node::new_alloc();
+    engine.set_name("hello");
+
+    node.signals()
+        .property_list_changed()
+        .connect_other(&engine, |this| {
+            assert_eq!(this.get_name(), StringName::from("hello"));
+        });
+
+    node.signals()
+        .property_list_changed()
+        .builder()
+        .connect_other_gd(&engine, |this| {
+            assert_eq!(this.get_name(), StringName::from("hello"));
+        });
+
+    node.signals().property_list_changed().emit();
+
+    node.free();
+    engine.free();
+}
+
+// Test that rustc is capable of inferring the parameter types of closures passed to the signal API's connect methods.
+#[itest]
+fn signal_symbols_connect_inferred() {
+    let user = Emitter::new_alloc();
+    let engine = Node::new_alloc();
+
+    // User signals.
+    user.signals()
+        .child_entered_tree()
+        .connect_other(&engine, |this, mut child| {
+            // Use methods that `Node` declares.
+            let _ = this.get_path(); // ref.
+            this.set_unique_name_in_owner(true); // mut.
+
+            // `child` is also a node.
+            let _ = child.get_path(); // ref.
+            child.set_unique_name_in_owner(true); // mut.
+        });
+
+    user.signals().renamed().connect_self(|this| {
+        // Use method/field that `Emitter` declares.
+        this.connect_base_signals_internal();
+        let _ = this.last_received_int;
+    });
+
+    // User signals, builder.
+    user.signals().renamed().builder().connect_self_mut(|this| {
+        // Use method/field that `Emitter` declares.
+        this.connect_base_signals_internal();
+        let _ = this.last_received_int;
+    });
+
+    // Engine signals.
+    engine.signals().ready().connect_other(&user, |this| {
+        // Use method/field that `Emitter` declares.
+        this.connect_base_signals_internal();
+        let _ = this.last_received_int;
+    });
+
+    // Engine signals, builder.
+    engine
+        .signals()
+        .tree_exiting()
+        .builder()
+        .flags(ConnectFlags::DEFERRED)
+        .connect_self_gd(|mut this| {
+            // Use methods that `Node` declares.
+            let _ = this.get_path(); // ref.
+            this.set_unique_name_in_owner(true); // mut.
+        });
+
+    engine
+        .signals()
+        .tree_exiting()
+        .builder()
+        .connect_other_mut(&user, |this| {
+            // Use methods that `Node` declares.
+            use godot::obj::WithBaseField; // not recommended pattern; `*_gd()` connectors preferred.
+
+            let _ = this.base().get_path(); // ref.
+            this.base_mut().set_unique_name_in_owner(true); // mut.
+        });
+
+    engine
+        .signals()
+        .tree_exiting()
+        .builder()
+        .connect_other_gd(&user, |mut this| {
+            // Use methods that `Node` declares.
+            let _ = this.get_path(); // ref.
+            this.set_unique_name_in_owner(true); // mut.
+        });
+
+    // Don't emit any signals, this test just needs to compile.
+
+    user.free();
+    engine.free();
+}
+
+// Test that Node signals are accessible from a derived class, when the class itself has no #[signal] declarations.
+// Verifies the code path that only generates the traits, no dedicated signal collection.
+#[itest]
+fn signal_symbols_engine_inherited_no_own_signals() {
+    let mut obj = Receiver::new_alloc();
+
+    let sig = obj.signals().property_list_changed();
+    sig.connect_self(|this| {
+        this.receive_int(941);
+    });
+
+    obj.notify_property_list_changed();
+    assert_eq!(obj.bind().last_received.get(), LastReceived::Int(941));
+
+    obj.free();
 }
 
 #[itest]
@@ -239,6 +488,54 @@ fn signal_construction_and_id() {
     assert_eq!(signal.object(), None);
 }
 
+#[itest]
+fn enums_as_signal_args() {
+    #[derive(Debug, Clone)]
+    enum EventType {
+        Ready,
+    }
+
+    impl GodotConvert for EventType {
+        type Via = u8;
+    }
+
+    impl ToGodot for EventType {
+        type Pass = godot::meta::ByValue;
+
+        fn to_godot(&self) -> Self::Via {
+            match self {
+                EventType::Ready => 0,
+            }
+        }
+    }
+
+    impl FromGodot for EventType {
+        fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
+            match via {
+                0 => Ok(Self::Ready),
+                _ => Err(ConvertError::new("value out of range")),
+            }
+        }
+    }
+
+    #[derive(GodotClass)]
+    #[class(base = RefCounted, init)]
+    struct SignalObject {
+        base: Base<RefCounted>,
+    }
+
+    #[godot_api]
+    impl SignalObject {
+        #[signal]
+        fn game_event(ty: EventType);
+    }
+
+    let object = SignalObject::new_gd();
+    let event = EventType::Ready;
+
+    object.signals().game_event().emit(event);
+}
+
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Helper types
 
@@ -249,13 +546,14 @@ static LAST_STATIC_FUNCTION_ARG: Global<i64> = Global::default();
 use emitter::Emitter;
 
 mod emitter {
+    use godot::obj::WithUserSignals;
+
     use super::*;
 
     #[derive(GodotClass)]
-    #[class(init, base=Object)]
+    #[class(init, base=Node3D)] // Node instead of Object to test some signals defined in superclasses.
     pub struct Emitter {
-        _base: Base<Object>,
-        #[cfg(since_api = "4.2")]
+        _base: Base<Node3D>,
         pub last_received_int: i64,
     }
 
@@ -269,14 +567,21 @@ mod emitter {
         pub fn signal_int(arg1: i64);
 
         #[signal]
-        fn signal_obj(arg1: Gd<Object>, arg2: GString);
+        pub(super) fn signal_obj(arg1: Gd<Object>, arg2: GString);
 
         #[func]
         pub fn self_receive(&mut self, arg1: i64) {
-            #[cfg(since_api = "4.2")]
-            {
-                self.last_received_int = arg1;
-            }
+            self.last_received_int = arg1;
+        }
+
+        #[func]
+        pub fn self_receive_gd_inc1(mut this: Gd<Self>, _arg1: i64) {
+            this.bind_mut().last_received_int += 1;
+        }
+
+        #[func]
+        pub fn self_receive_constant(&mut self) {
+            self.last_received_int = 553;
         }
 
         #[func]
@@ -286,17 +591,26 @@ mod emitter {
 
         // "Internal" means connect/emit happens from within the class (via &mut self).
 
-        #[cfg(since_api = "4.2")]
         pub fn connect_signals_internal(&mut self, tracker: Rc<Cell<i64>>) {
-            let mut sig = self.signals().signal_int();
+            let sig = self.signals().signal_int();
             sig.connect_self(Self::self_receive);
             sig.connect(Self::self_receive_static);
             sig.connect(move |i| tracker.set(i));
+            sig.builder().connect_self_gd(Self::self_receive_gd_inc1);
         }
 
-        #[cfg(since_api = "4.2")]
         pub fn emit_signals_internal(&mut self) {
             self.signals().signal_int().emit(1234);
+        }
+
+        pub fn connect_base_signals_internal(&mut self) {
+            self.signals()
+                .renamed()
+                .connect_self(Emitter::self_receive_constant);
+        }
+
+        pub fn emit_base_signals_internal(&mut self) {
+            self.signals().renamed().emit();
         }
     }
 }
@@ -319,8 +633,11 @@ struct Receiver {
     last_received: Cell<LastReceived>,
     base: Base<Object>,
 }
+
 #[godot_api]
 impl Receiver {
+    // Do not declare any #[signal]s here -- explicitly test this implements WithSignal without them.
+
     fn last_received(&self) -> LastReceived {
         self.last_received.get()
     }
@@ -350,16 +667,31 @@ impl Receiver {
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
-// 4.2+ custom callables
 
-#[cfg(since_api = "4.2")]
+// Class which is deliberately `pub` but has only private `#[signal]` declaration.
+// Regression test, as this caused "leaked private types" in the past.
+#[derive(GodotClass)]
+#[class(init, base=Object)]
+pub struct PubClassPrivSignal {
+    _base: Base<Object>,
+}
+
+#[godot_api]
+impl PubClassPrivSignal {
+    #[signal]
+    fn private_signal();
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------
+// Custom callables
+
 mod custom_callable {
-    use godot::builtin::{Callable, Signal};
-    use godot::classes::Node;
-    use godot::meta::ToGodot;
-    use godot::obj::{Gd, NewAlloc};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    use godot::builtin::{vslice, Callable, Signal, Variant};
+    use godot::classes::Node;
+    use godot::obj::{Gd, NewAlloc};
 
     use crate::builtin_tests::containers::callable_test::custom_callable::PanicCallable;
     use crate::framework::{itest, TestContext};
@@ -373,7 +705,7 @@ mod custom_callable {
                 node.add_user_signal("test_signal");
             },
             |node| {
-                node.emit_signal("test_signal", &[987i64.to_variant()]);
+                node.emit_signal("test_signal", vslice![987i64]);
             },
         );
     }
@@ -387,7 +719,7 @@ mod custom_callable {
                 node.add_user_signal("test_signal");
             },
             |node| {
-                node.emit_signal("test_signal", &[987i64.to_variant()]);
+                node.emit_signal("test_signal", vslice![987i64]);
             },
         );
     }
@@ -456,7 +788,7 @@ mod custom_callable {
     }
 
     // ------------------------------------------------------------------------------------------------------------------------------------------
-    // 4.2+ custom callables - helper functions
+    // Custom callables - helper functions
 
     fn add_remove_child(ctx: &TestContext, node: &mut Gd<Node>) {
         let mut tree = ctx.scene_tree.clone();
@@ -477,7 +809,7 @@ mod custom_callable {
 
         let received = Arc::new(AtomicU32::new(0));
         let callable = callable(received.clone());
-        signal.connect(&callable, 0);
+        signal.connect(&callable);
 
         emit(&mut node);
         assert_eq!(1, received.load(Ordering::SeqCst));
@@ -486,7 +818,9 @@ mod custom_callable {
     }
 
     fn connect_signal_panic_from_fn(received: Arc<AtomicU32>) -> Callable {
-        Callable::from_local_fn("test", move |_args| {
+        // Explicit `Variant` return type to avoid following warning becoming a hard error in edition 2024.
+        // warning: this function depends on never type fallback being `()`
+        Callable::from_fn("test", move |_args| -> Variant {
             panic!("TEST: {}", received.fetch_add(1, Ordering::SeqCst))
         })
     }
