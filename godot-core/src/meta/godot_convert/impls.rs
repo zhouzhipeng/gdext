@@ -7,7 +7,8 @@
 
 use godot_ffi as sys;
 
-use crate::builtin::{Array, Variant};
+use crate::builtin::{Array, GString, Variant};
+use crate::global::PropertyHint;
 use crate::meta;
 use crate::meta::error::{ConvertError, ErrorKind, FromFfiError, FromVariantError};
 use crate::meta::{
@@ -15,7 +16,7 @@ use crate::meta::{
     PropertyInfo, ToGodot,
 };
 use crate::registry::method::MethodParamOrReturnInfo;
-
+use crate::registry::property::{Export, Var};
 // The following ToGodot/FromGodot/Convert impls are auto-generated for each engine type, co-located with their definitions:
 // - enum
 // - const/mut pointer to native struct
@@ -378,23 +379,23 @@ impl FromGodot for u64 {
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Collections
 
-impl<T: ArrayElement> GodotConvert for Vec<T> {
-    type Via = Array<T>;
-}
-
-impl<T: ArrayElement> ToGodot for Vec<T> {
-    type Pass = meta::ByValue;
-
-    fn to_godot(&self) -> Self::Via {
-        Array::from(self.as_slice())
-    }
-}
-
-impl<T: ArrayElement> FromGodot for Vec<T> {
-    fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
-        Ok(via.iter_shared().collect())
-    }
-}
+// impl<T: ArrayElement> GodotConvert for Vec<T> {
+//     type Via = Array<T>;
+// }
+//
+// impl<T: ArrayElement> ToGodot for Vec<T> {
+//     type Pass = meta::ByValue;
+//
+//     fn to_godot(&self) -> Self::Via {
+//         Array::from(self.as_slice())
+//     }
+// }
+//
+// impl<T: ArrayElement> FromGodot for Vec<T> {
+//     fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
+//         Ok(via.iter_shared().collect())
+//     }
+// }
 
 impl<T: ArrayElement, const LEN: usize> GodotConvert for [T; LEN] {
     type Via = Array<T>;
@@ -445,6 +446,62 @@ impl<T: ArrayElement> ToGodot for &[T] {
 
     fn to_godot(&self) -> Self::Via {
         Array::from(*self)
+    }
+}
+
+//  implement for Vec<CustomEnumType> to @export
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> GodotConvert for Vec<T>
+{
+    type Via = Array<GString>;
+}
+
+
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> ToGodot for Vec<T>{
+    type Pass = meta::ByValue;
+
+
+    fn to_godot(&self) -> Self::Via {
+        let mut array = Array::new();
+        for x in self {
+            array.push(&x.to_variant().to_string());
+
+        }
+        array
+    }
+}
+
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> FromGodot for  Vec<T>{
+    fn try_from_godot(via: Self::Via) -> Result<Self, ConvertError> {
+        let mut ret = vec![];
+        for x in via.iter_shared() {
+            ret.push(T::from_godot(x));
+        }
+        Ok(ret)
+    }
+}
+
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Var for  Vec<T>
+{
+    fn get_property(&self) -> Self::Via {
+        ToGodot::to_godot(self)
+    }
+
+    fn set_property(&mut self, value: Self::Via) {
+        *self = FromGodot::from_godot(value);
+    }
+    fn var_hint() -> PropertyHintInfo {
+        PropertyHintInfo{
+            hint: PropertyHint::ARRAY_TYPE,
+            // "hint_string": str(TYPE_INT) + "/" + str(PROPERTY_HINT_ENUM) + ":" + ",".join(CustomEnum.keys())
+            hint_string: GString::from(&format!("4/2:{}",  T::var_hint().hint_string.to_string()))
+        }
+    }
+}
+
+impl<T:GodotConvert<Via =GString> + ToGodot + FromGodot + Var> Export for Vec<T>{
+    fn export_hint() -> PropertyHintInfo {
+
+        Self::var_hint()
     }
 }
 
